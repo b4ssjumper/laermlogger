@@ -21,6 +21,7 @@
   h1 .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
   .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8rem; margin-bottom: 1rem; }
   .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: .8rem 1rem; }
+  .grid > .card { min-height: 160px; }   /* stabile Höhe -> kein Layout-Shift */
   .card .label { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; }
   .card .value { font-size: 1.7rem; font-weight: 600; font-variant-numeric: tabular-nums; }
   .card .value small { font-size: .9rem; color: var(--muted); font-weight: 400; }
@@ -41,13 +42,18 @@
   .badge { padding: .15rem .6rem; border-radius: 99px; font-size: .78rem; border: 1px solid var(--border); color: var(--muted); }
   .badge.ok { color: var(--ok); border-color: var(--ok); }
   .badge.bad { color: var(--bad); border-color: var(--bad); }
-  #topClasses { font-size: .82rem; color: var(--muted); }
+  #topClasses { font-size: .82rem; color: var(--muted); min-height: 3.4em; }
+  #category .value { font-size: 1.15rem; line-height: 1.2; overflow-wrap: anywhere; }
   .ev { display: flex; align-items: center; gap: .8rem; padding: .5rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .ev:last-child { border-bottom: 0; }
   .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 6.5rem; }
   .ev .db { font-weight: 600; color: var(--accent); min-width: 4rem; font-variant-numeric: tabular-nums; }
   .ev .cat { min-width: 8rem; }
   .ev audio { height: 2rem; max-width: 100%; }
+  .ev input.lbl { width: 9rem; padding: .3rem .5rem; }
+  .ev .pred { font-size: .78rem; color: var(--ok); border: 1px solid var(--ok); border-radius: 99px; padding: .1rem .5rem; }
+  #trainBar { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin-bottom: .7rem; }
+  #btnTrain { background: var(--ok); color: #05261a; }
   .sess { display: flex; align-items: center; gap: .8rem; padding: .5rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
   .sess:last-child { border-bottom: 0; }
   .sess .nm { font-variant-numeric: tabular-nums; }
@@ -93,7 +99,12 @@
 </div>
 
 <div class="card wide" style="margin-top:1rem">
-  <div class="label" style="margin-bottom:.4rem">Ereignisse (lauteste Momente — zum Anhören)</div>
+  <div class="label" style="margin-bottom:.4rem">Ereignisse (lauteste Momente — anhören &amp; benennen)</div>
+  <div id="trainBar">
+    <button id="btnTrain">🎯 Eigene Geräusche trainieren</button>
+    <span id="labelSummary" class="muted">Noch keine Labels — hör dir Clips an und trag rechts ein, was es ist.</span>
+  </div>
+  <datalist id="labelList"></datalist>
   <div id="eventClips" class="muted">Noch keine Ereignisse.</div>
 </div>
 
@@ -143,18 +154,72 @@ function render(s) {
   renderEvents(s.events || [], s.session_name);
 }
 
+let curSession = null;
+let sessionLabels = {};   // mp3 -> vom Nutzer vergebenes Label
+
 function renderEvents(events, session) {
+  curSession = session;
   const el = $("eventClips");
   if (!events.length) { el.innerHTML = '<span class="muted">Noch keine Ereignisse.</span>'; return; }
   el.innerHTML = events.map(e => {
     const t = new Date(e.ts * 1000).toLocaleTimeString("de-DE");
     const url = session ? `/api/audio/${session}/${e.mp3}` : "#";
+    const userLabel = sessionLabels[e.mp3] || "";
+    const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
     return `<div class="ev"><span class="t">${t}</span>`
       + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
       + `<span class="cat">${e.category || "—"}</span>`
-      + `<audio controls preload="none" src="${url}"></audio></div>`;
+      + `<audio controls preload="none" src="${url}"></audio>`
+      + pred
+      + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
+      + ` onchange="saveLabel('${e.mp3}', this.value)"></div>`;
   }).join("");
 }
+
+async function saveLabel(mp3, label) {
+  if (!curSession) return;
+  sessionLabels[mp3] = label;
+  await fetch("/api/label", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ session: curSession, mp3, label })
+  });
+  loadLabels();
+}
+
+async function loadLabels() {
+  try {
+    const r = await fetch("/api/labels");
+    const d = await r.json();
+    const entries = Object.entries(d.summary || {});
+    $("labelList").innerHTML = entries.map(([l]) => `<option value="${l}">`).join("");
+    const total = entries.reduce((s, [, n]) => s + n, 0);
+    $("labelSummary").textContent = entries.length
+      ? `${total} Clips gelabelt: ` + entries.map(([l, n]) => `${l} (${n})`).join(", ")
+        + (d.model && d.model.trained ? ` · Modell aktiv: ${d.model.labels.join(", ")}` : " · noch nicht trainiert")
+      : "Noch keine Labels — hör dir Clips an und trag rechts ein, was es ist.";
+    if (curSession) {
+      const sr = await fetch(`/api/session/${curSession}/labels`);
+      sessionLabels = await sr.json();
+    }
+  } catch (e) { /* ignore */ }
+}
+
+$("btnTrain").onclick = async () => {
+  const btn = $("btnTrain");
+  btn.disabled = true; btn.textContent = "⏳ Trainiere…";
+  try {
+    const r = await fetch("/api/train", { method: "POST" });
+    const d = await r.json();
+    if (d.trained) {
+      const cnt = Object.entries(d.labels).map(([l, n]) => `${l} (${n})`).join(", ");
+      alert(`Modell trainiert!\nGelernte Geräusche: ${cnt}\n\nNeue laute Momente werden ab jetzt automatisch erkannt.`);
+    } else {
+      alert("Training nicht möglich: " + (d.reason || "unbekannt") + "\nBitte erst ein paar Clips benennen.");
+    }
+  } catch (e) { alert("Training fehlgeschlagen."); }
+  btn.disabled = false; btn.textContent = "🎯 Eigene Geräusche trainieren";
+  loadLabels();
+};
 
 async function loadSessions() {
   try {
@@ -222,7 +287,9 @@ $("btnStop").onclick = async () => {
 
 connect();
 loadSessions();
+loadLabels();
 setInterval(loadSessions, 15000);
+setInterval(loadLabels, 15000);
 </script>
 </body>
 </html>

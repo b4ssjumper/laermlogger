@@ -20,6 +20,7 @@ import numpy as np
 
 from collections import deque
 
+from . import custom_sounds
 from .audio_capture import AudioCapture
 from .audio_events import encode_mp3, ffmpeg_available
 from .calibration import LevelCalibration, audio_dbfs
@@ -63,10 +64,11 @@ CREATE INDEX IF NOT EXISTS idx_cls_ts ON classifications(ts);
 CREATE TABLE IF NOT EXISTS events (
     ts REAL NOT NULL,             -- Zeitpunkt des Peaks
     peak_db REAL NOT NULL,
-    category TEXT DEFAULT '',     -- erkannte Lärmquelle zum Peak
+    category TEXT DEFAULT '',     -- erkannte Lärmquelle zum Peak (YAMNet)
     top_classes TEXT DEFAULT '',
     mp3_path TEXT DEFAULT '',     -- relativ zum Session-Ordner
-    duration_s REAL DEFAULT 0
+    duration_s REAL DEFAULT 0,
+    custom_label TEXT DEFAULT ''  -- Vorhersage des eigenen Modells
 );
 CREATE INDEX IF NOT EXISTS idx_ev_ts ON events(ts);
 """
@@ -153,6 +155,7 @@ class SessionAggregator:
         self._n_events = 0
         self._recent_events: deque = deque(maxlen=50)
         self._events_lock = threading.Lock()
+        self._custom_model = None   # eigenes Sound-Modell (falls trainiert)
 
     # ------------------------------------------------------------------
     def start(self) -> None:
@@ -190,6 +193,7 @@ class SessionAggregator:
             except Exception as exc:
                 log.error("Classifier-Start fehlgeschlagen: %s", exc)
                 self._classifier = None
+        self.reload_custom_model()
 
         t1 = threading.Thread(target=self._consume_spl, name="spl-consumer", daemon=True)
         t1.start()
@@ -287,6 +291,16 @@ class SessionAggregator:
             self.state.calibration = self._calib.stats()
             self.state.n_events = self._n_events
 
+    def reload_custom_model(self) -> None:
+        """Eigenes Sound-Modell (neu) laden — nach dem Trainieren aufgerufen."""
+        try:
+            self._custom_model = custom_sounds.CustomModel.load(self.cfg)
+            if self._custom_model:
+                log.info("Eigenes Sound-Modell aktiv: %s", self._custom_model.labels)
+        except Exception as exc:
+            log.warning("Custom-Modell laden fehlgeschlagen: %s", exc)
+            self._custom_model = None
+
     # ---- Audio-Ereignisse (Peak-Clips) --------------------------------
     def _maybe_trigger_event(self, sample: SplSample) -> None:
         """Bei Pegelspitze über Schwelle (mit Cooldown) ein Ereignis anstoßen."""
@@ -323,18 +337,27 @@ class SessionAggregator:
             if not encode_mp3(wave, rate, mp3_path, ec.mp3_quality):
                 continue
             category, top = self._category_at(peak_ts)
+            # eigenes Modell (falls trainiert) auf den Clip anwenden
+            custom_label = ""
+            if self._custom_model and self._classifier:
+                try:
+                    feat = self._classifier.embed(wave)
+                    lbl, _sim = self._custom_model.predict(feat)
+                    custom_label = lbl or ""
+                except Exception as exc:
+                    log.debug("Custom-Predict fehlgeschlagen: %s", exc)
             with self._db_lock:
                 self._conn.execute(
-                    "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (peak_ts, peak_db, category, top, fname,
-                     ec.pre_seconds + ec.post_seconds),
+                     ec.pre_seconds + ec.post_seconds, custom_label),
                 )
                 self._conn.commit()
             self._n_events += 1
             with self._events_lock:
                 self._recent_events.appendleft({
                     "ts": peak_ts, "peak_db": round(peak_db, 1),
-                    "category": category, "mp3": fname,
+                    "category": category, "mp3": fname, "custom_label": custom_label,
                 })
             log.info("Ereignis %.1f dB um %s -> %s", peak_db, dt.strftime("%H:%M:%S"), fname)
 

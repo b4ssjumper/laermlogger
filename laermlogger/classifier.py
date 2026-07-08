@@ -65,6 +65,35 @@ class YamnetClassifier:
     def _map_category(self, class_name: str) -> str:
         return self.source_map.get(class_name, FALLBACK_CATEGORY)
 
+    def score_window(self, waveform_16k: np.ndarray) -> np.ndarray:
+        """Roher 521-Score-Vektor für EIN 0,975-s-Fenster (16 kHz, -1..1)."""
+        x = np.asarray(waveform_16k, dtype=np.float32)
+        if len(x) < YAMNET_INPUT_SAMPLES:
+            x = np.pad(x, (0, YAMNET_INPUT_SAMPLES - len(x)))
+        x = x[:YAMNET_INPUT_SAMPLES]
+        peak = float(np.max(np.abs(x)))
+        if peak > 1e-4:
+            x = x * (0.5 / peak)
+        self.interpreter.set_tensor(self._input["index"], x)
+        self.interpreter.invoke()
+        return self.interpreter.get_tensor(self._output["index"])[0].astype("float32")
+
+    def embed(self, waveform_16k: np.ndarray) -> np.ndarray:
+        """L2-normalisierter Mittel-Score-Vektor über einen ganzen Clip.
+
+        Dient als „Klang-Fingerabdruck" fürs eigene Sound-Training.
+        """
+        x = np.asarray(waveform_16k, dtype=np.float32)
+        step = YAMNET_INPUT_SAMPLES
+        if len(x) <= step:
+            vec = self.score_window(x)
+        else:
+            n = max(1, len(x) // step)
+            vecs = [self.score_window(x[i * step:(i + 1) * step]) for i in range(n)]
+            vec = np.mean(vecs, axis=0)
+        norm = np.linalg.norm(vec)
+        return vec / norm if norm > 0 else vec
+
     def classify(self, waveform_16k: np.ndarray, timestamp: float) -> Classification:
         """Ein 0,975-s-Fenster (16 kHz float32, -1..1) klassifizieren."""
         x = np.asarray(waveform_16k, dtype=np.float32)

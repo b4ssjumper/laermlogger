@@ -123,11 +123,15 @@ async def session_events(session_name: str):
     if not db_path.exists():
         raise HTTPException(404, "Session nicht gefunden")
     c = sqlite3.connect(db_path)
-    rows = c.execute("SELECT ts, peak_db, category, mp3_path FROM events "
-                     "ORDER BY ts DESC").fetchall()
+    try:
+        rows = c.execute("SELECT ts, peak_db, category, mp3_path, custom_label "
+                         "FROM events ORDER BY ts DESC").fetchall()
+    except sqlite3.OperationalError:
+        rows = [(r[0], r[1], r[2], r[3], "") for r in c.execute(
+            "SELECT ts, peak_db, category, mp3_path FROM events ORDER BY ts DESC")]
     c.close()
-    return [{"ts": r[0], "peak_db": r[1], "category": r[2], "mp3": r[3]}
-            for r in rows]
+    return [{"ts": r[0], "peak_db": r[1], "category": r[2], "mp3": r[3],
+             "custom_label": r[4]} for r in rows]
 
 
 @app.delete("/api/session/{session_name}")
@@ -184,6 +188,63 @@ async def report(session_name: str):
     pdf_path = await asyncio.to_thread(build_report, db_path, _cfg)
     return FileResponse(pdf_path, media_type="application/pdf",
                         filename=pdf_path.name)
+
+
+_training_classifier = None
+
+
+def _get_classifier():
+    """Classifier für Labeln/Trainieren — reuse der laufenden Session oder einmalig laden."""
+    global _training_classifier
+    if _session is not None and getattr(_session, "_classifier", None) is not None:
+        return _session._classifier
+    if _training_classifier is None:
+        from ..classifier import YamnetClassifier
+        _training_classifier = YamnetClassifier(_cfg.classifier)
+    return _training_classifier
+
+
+@app.post("/api/label")
+async def set_label(payload: dict):
+    """Einem Clip ein eigenes Label zuweisen (leeres Label = entfernen)."""
+    from .. import custom_sounds
+
+    session = payload.get("session")
+    mp3 = payload.get("mp3")
+    label = payload.get("label", "")
+    if not session or not mp3:
+        raise HTTPException(400, "session und mp3 nötig")
+    custom_sounds.label_clip(_cfg, session, mp3, label)
+    return {"ok": True, "summary": custom_sounds.label_summary(_cfg)}
+
+
+@app.get("/api/labels")
+async def get_labels():
+    """Übersicht aller vergebenen Labels + Modellstatus."""
+    from .. import custom_sounds
+
+    return {"summary": custom_sounds.label_summary(_cfg),
+            "model": custom_sounds.model_status(_cfg)}
+
+
+@app.get("/api/session/{session_name}/labels")
+async def session_labels(session_name: str):
+    from .. import custom_sounds
+
+    return custom_sounds.labels_for_session(_cfg, session_name)
+
+
+@app.post("/api/train")
+async def train_model():
+    """Eigenes Sound-Modell aus den gelabelten Clips bauen."""
+    from .. import custom_sounds
+
+    classifier = await asyncio.to_thread(_get_classifier)
+    result = await asyncio.to_thread(custom_sounds.train, _cfg, classifier)
+    # laufende Session soll das neue Modell sofort nutzen
+    if _session is not None and _session.state.running:
+        await asyncio.to_thread(_session.reload_custom_model)
+    return result
 
 
 @app.websocket("/ws")
