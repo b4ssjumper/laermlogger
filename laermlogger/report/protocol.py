@@ -234,6 +234,58 @@ def _exceedance_events(timestamps: np.ndarray, levels: np.ndarray,
     return events
 
 
+def session_levels(db_path: Path, buckets: int = 800) -> list[dict]:
+    """Pegelverlauf einer (abgeschlossenen) Session, in ~buckets Zeit-Buckets
+    aggregiert (MAX je Bucket). Für die interaktive Review-Ansicht."""
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute("SELECT MIN(ts), MAX(ts) FROM spl_samples").fetchone()
+        if not row or row[0] is None:
+            return []
+        t0, t1 = row
+        bucket = max((t1 - t0) / buckets, 1e-6)
+        rows = conn.execute(
+            "SELECT AVG(ts), MAX(db) FROM spl_samples "
+            "GROUP BY CAST((ts - ?) / ? AS INT) ORDER BY 1", (t0, bucket)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [{"ts": r[0], "db": r[1]} for r in rows]
+
+
+def session_summary(db_path: Path, cfg: Config) -> dict:
+    """Kennwerte einer Session (LAeq, Perzentile, Tag/Nacht) als dict — ohne PDF."""
+    data = _load_session(db_path)
+    spl = data["spl"]
+    meta = data["meta"]
+    if not spl:
+        return {"meta": meta, "n_samples": 0}
+    ts = np.array([r[0] for r in spl])
+    lv = np.array([r[1] for r in spl])
+    imp, ton = _detect_surcharges(data["classifications"])
+    m = evaluate_session(ts, lv, cfg.rating, imp, ton)
+    events = _load_audio_events(db_path)
+    return {
+        "meta": meta,
+        "started": meta["started_at"], "ended": meta["ended_at"],
+        "duration_min": (ts[-1] - ts[0]) / 60,
+        "n_samples": len(lv), "n_events": len(events),
+        "laeq_db": round(m.overall.laeq_db, 1),
+        "lafmax_db": round(m.overall.lafmax_db, 1),
+        "lafmin_db": round(m.overall.lafmin_db, 1),
+        "percentiles": {k: round(v, 1) for k, v in m.overall.percentiles.items()},
+        "day": _rating_dict(m.day), "night": _rating_dict(m.night),
+        "sources": _event_source_shares(db_path, cfg, events),
+    }
+
+
+def _rating_dict(r) -> dict | None:
+    if r is None:
+        return None
+    return {"laeq_db": round(r.laeq_db, 1), "rating_level_db": round(r.rating_level_db, 1),
+            "limit_db": r.limit_db, "exceeds_limit": r.exceeds_limit, "note": r.note}
+
+
 def _load_audio_events(db_path: Path) -> list[dict]:
     """Aufgezeichnete Audio-Ereignisse (MP3-Clips) einer Session laden."""
     conn = sqlite3.connect(db_path)

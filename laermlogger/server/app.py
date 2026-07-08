@@ -114,6 +114,28 @@ async def audio_clip(session_name: str, filename: str):
     return FileResponse(path, media_type="audio/mpeg", filename=filename)
 
 
+@app.get("/api/session/{session_name}/summary")
+async def session_summary_ep(session_name: str):
+    """Kennwerte einer abgeschlossenen Messung (ohne PDF)."""
+    from ..report.protocol import session_summary
+
+    db_path = Path(_cfg.db_dir) / f"{session_name}.sqlite"
+    if not db_path.exists():
+        raise HTTPException(404, "Session nicht gefunden")
+    return await asyncio.to_thread(session_summary, db_path, _cfg)
+
+
+@app.get("/api/session/{session_name}/levels")
+async def session_levels_ep(session_name: str, buckets: int = 800):
+    """Aggregierter Pegelverlauf einer abgeschlossenen Messung."""
+    from ..report.protocol import session_levels
+
+    db_path = Path(_cfg.db_dir) / f"{session_name}.sqlite"
+    if not db_path.exists():
+        raise HTTPException(404, "Session nicht gefunden")
+    return await asyncio.to_thread(session_levels, db_path, buckets)
+
+
 @app.get("/api/session/{session_name}/events")
 async def session_events(session_name: str):
     """Alle Ereignisse einer (auch abgeschlossenen) Session aus SQLite."""

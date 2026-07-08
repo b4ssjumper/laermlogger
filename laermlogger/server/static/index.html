@@ -66,6 +66,14 @@
   .sess a.clips { color: var(--ok); border-color: var(--ok); }
   .clipbox { padding-left: 1rem; }
   .clipbox:not(:empty) { margin: .3rem 0 1rem; border-left: 2px solid var(--border); }
+  .sess a.open { color: var(--accent); border-color: var(--accent); }
+  .rv-grid { display: flex; gap: 1.5rem; flex-wrap: wrap; margin: .5rem 0; }
+  .rv-grid .label { font-size: .72rem; }
+  .rv-val { font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .rv-row { margin: .2rem 0; font-size: .9rem; }
+  #reviewActions a { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 6px; padding: .25rem .8rem; font-size: .82rem; margin-left: .4rem; }
+  #reviewActions a.csv { color: var(--muted); border-color: var(--border); }
+  #reviewActions a.close { color: var(--muted); border-color: var(--border); }
   .perc { display: flex; gap: 1rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
   .perc span b { color: var(--text); }
   #category .value { font-size: 1.25rem; }
@@ -82,6 +90,15 @@
   <span class="badge" id="serialBadge">Seriell: –</span>
   <span class="badge" id="audioBadge">Audio: –</span>
   <span class="badge" id="clock">–</span>
+</div>
+
+<div class="card wide" id="review" hidden style="margin-bottom:1rem;border-color:var(--accent)">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:.5rem;flex-wrap:wrap">
+    <span class="label" id="reviewTitle" style="font-size:.95rem;color:var(--text)"></span>
+    <span id="reviewActions"></span>
+  </div>
+  <div id="reviewBody"></div>
+  <div id="reviewClips" style="margin-top:.6rem"></div>
 </div>
 
 <div class="grid">
@@ -217,17 +234,8 @@ async function saveLabel(mp3, label, session) {
   loadLabels();
 }
 
-// Clip-Browser einer (auch abgeschlossenen) Messung: alle Clips anhören & benennen
-async function toggleClips(name) {
-  const box = $("clips-" + name);
-  if (box.innerHTML) { box.innerHTML = ""; return; }
-  box.innerHTML = '<span class="muted">lädt…</span>';
-  const [evs, labels] = await Promise.all([
-    fetch(`/api/session/${name}/events`).then(r => r.json()),
-    fetch(`/api/session/${name}/labels`).then(r => r.json())
-  ]);
-  if (!evs.length) { box.innerHTML = '<span class="muted">Keine Clips in dieser Messung.</span>'; return; }
-  box.innerHTML = evs.map(e => {
+function clipRowsHTML(evs, labels, name) {
+  return evs.map(e => {
     const t = new Date(e.ts * 1000).toLocaleString("de-DE");
     const userLabel = labels[e.mp3] || "";
     const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
@@ -239,6 +247,19 @@ async function toggleClips(name) {
       + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
       + ` onchange="saveLabel('${e.mp3}', this.value, '${name}')"></div>`;
   }).join("");
+}
+
+// Clip-Browser einer (auch abgeschlossenen) Messung: alle Clips anhören & benennen
+async function toggleClips(name) {
+  const box = $("clips-" + name);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  box.innerHTML = '<span class="muted">lädt…</span>';
+  const [evs, labels] = await Promise.all([
+    fetch(`/api/session/${name}/events`).then(r => r.json()),
+    fetch(`/api/session/${name}/labels`).then(r => r.json())
+  ]);
+  box.innerHTML = evs.length ? clipRowsHTML(evs, labels, name)
+                             : '<span class="muted">Keine Clips in dieser Messung.</span>';
 }
 
 async function loadLabels() {
@@ -286,15 +307,11 @@ async function loadSessions() {
       const start = s.started ? new Date(s.started * 1000).toLocaleString("de-DE") : "—";
       const mins = (s.started && s.ended) ? Math.round((s.ended - s.started) / 60) : null;
       const dur = mins != null ? `${mins} min` : (s.ended ? "" : "läuft…");
-      const clipsBtn = s.n_events > 0
-        ? `<a class="clips" href="#" onclick="toggleClips('${s.name}');return false">🎧 ${s.n_events} Clips labeln</a>` : "";
       return `<div class="sess"><span class="nm">${s.name}</span>`
         + `<span class="meta">${start} · ${dur} · ${s.n_samples} Werte · ${s.n_events} Ereignisse</span>`
-        + clipsBtn
+        + `<a class="open" href="#" onclick="openReview('${s.name}');return false">📊 Öffnen</a>`
         + `<a href="/api/report/${s.name}" target="_blank">PDF</a>`
-        + `<a class="csv" href="/api/export/${s.name}?fmt=csv" target="_blank">CSV</a>`
-        + `<a class="del" href="#" onclick="deleteSession('${s.name}');return false">Löschen</a></div>`
-        + `<div id="clips-${s.name}" class="clipbox"></div>`;
+        + `<a class="del" href="#" onclick="deleteSession('${s.name}');return false">Löschen</a></div>`;
     }).join("");
   } catch (e) { /* ignore */ }
 }
@@ -323,19 +340,19 @@ async function refreshChart() {
     levels = await r.json();
   } catch (e) { return; }
   $("chartLabel").textContent = "Pegelverlauf (" + (RANGE_LABEL[chartRange] || "") + ")";
-  drawChart();
+  drawChart($("chart"), levels);
 }
 
-function drawChart() {
-  const c = $("chart"), ctx = c.getContext("2d");
+function drawChart(c, data) {
+  const ctx = c.getContext("2d");
   ctx.clearRect(0, 0, c.width, c.height);
-  if (levels.length < 2) return;
-  const dbs = levels.map(p => p.db);
+  if (!data || data.length < 2) return;
+  const dbs = data.map(p => p.db);
   const min = Math.floor(Math.min(...dbs) / 10) * 10;
   const max = Math.ceil(Math.max(...dbs) / 10) * 10;
-  const t0 = levels[0].ts, t1 = levels[levels.length - 1].ts;
+  const t0 = data[0].ts, t1 = data[data.length - 1].ts;
   const pad = 34, w = c.width - pad - 8, h = c.height - 34;
-  const x = i => pad + (i / (levels.length - 1)) * w;
+  const x = i => pad + (i / (data.length - 1)) * w;
   const y = db => 8 + (1 - (db - min) / Math.max(max - min, 1)) * (h - 8);
 
   ctx.strokeStyle = "#2a323c"; ctx.fillStyle = "#8b96a1"; ctx.font = "11px system-ui";
@@ -344,7 +361,6 @@ function drawChart() {
     ctx.beginPath(); ctx.moveTo(pad, y(g)); ctx.lineTo(pad + w, y(g)); ctx.stroke();
     ctx.fillText(g, 4, y(g) + 4);
   }
-  // Zeitachse: 5 Beschriftungen
   const span = t1 - t0;
   const fmtT = ts => {
     const d = new Date(ts * 1000);
@@ -353,13 +369,59 @@ function drawChart() {
   };
   ctx.textAlign = "center";
   for (let k = 0; k <= 4; k++) {
-    const i = Math.round(k / 4 * (levels.length - 1));
-    ctx.fillText(fmtT(levels[i].ts), x(i), h + 22);
+    const i = Math.round(k / 4 * (data.length - 1));
+    ctx.fillText(fmtT(data[i].ts), x(i), h + 22);
   }
   ctx.strokeStyle = "#4cc2ff"; ctx.lineWidth = 1.6; ctx.beginPath();
-  levels.forEach((p, i) => i ? ctx.lineTo(x(i), y(p.db)) : ctx.moveTo(x(i), y(p.db)));
+  data.forEach((p, i) => i ? ctx.lineTo(x(i), y(p.db)) : ctx.moveTo(x(i), y(p.db)));
   ctx.stroke(); ctx.lineWidth = 1;
 }
+
+// ---- Messung öffnen (abgeschlossene Session interaktiv ansehen) --------
+async function openReview(name) {
+  const rv = $("review");
+  rv.hidden = false;
+  rv.scrollIntoView({behavior: "smooth"});
+  $("reviewTitle").textContent = "Messung: " + name;
+  $("reviewBody").innerHTML = '<span class="muted">lädt…</span>';
+  const [sum, lv] = await Promise.all([
+    fetch(`/api/session/${name}/summary`).then(r => r.json()),
+    fetch(`/api/session/${name}/levels?buckets=900`).then(r => r.json())
+  ]);
+  const p = sum.percentiles || {};
+  const rate = (r, lbl) => r ? `<div class="rv-row"><b>${lbl}</b> Lr ${r.rating_level_db} dB / Richtwert ${r.limit_db} dB — `
+      + (r.exceeds_limit ? `<span style="color:var(--bad)">überschritten</span>` : `<span style="color:var(--ok)">eingehalten</span>`)
+      + (r.note ? ` <span class="muted">(${r.note})</span>` : "") + `</div>` : "";
+  const started = sum.started ? new Date(sum.started*1000).toLocaleString("de-DE") : "—";
+  $("reviewActions").innerHTML =
+      `<a href="/api/report/${name}" target="_blank">📄 PDF erzeugen</a>`
+    + `<a class="csv" href="/api/export/${name}?fmt=csv" target="_blank">CSV</a>`
+    + `<a class="close" href="#" onclick="closeReview();return false">✕ schließen</a>`;
+  $("reviewBody").innerHTML =
+      `<div class="rv-grid">`
+    + `<div><span class="label">LAeq</span><div class="rv-val">${sum.laeq_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">LAFmax</span><div class="rv-val">${sum.lafmax_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">LAFmin</span><div class="rv-val">${sum.lafmin_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">Dauer</span><div class="rv-val">${Math.round(sum.duration_min||0)} min</div></div>`
+    + `</div>`
+    + `<div class="perc" style="margin:.5rem 0">` + Object.entries(p).map(([k,v]) => `<span>${k}: <b>${v}</b> dB</span>`).join("") + `</div>`
+    + rate(sum.day, "Tag") + rate(sum.night, "Nacht")
+    + `<div class="muted" style="margin:.3rem 0">Beginn: ${started} · ${sum.n_samples} Werte · ${sum.n_events} Ereignisse</div>`
+    + (sum.sources && sum.sources.length ? `<div class="muted">Quellen: ` + sum.sources.map(s => `${s.category} ${(s.share*100).toFixed(0)}%`).join(" · ") + `</div>` : "")
+    + `<canvas id="reviewChart" width="1060" height="300" style="margin-top:.6rem"></canvas>`;
+  drawChart($("reviewChart"), lv);
+
+  // Clips zum Anhören & Benennen direkt in die Messung integriert
+  const [evs, labels] = await Promise.all([
+    fetch(`/api/session/${name}/events`).then(r => r.json()),
+    fetch(`/api/session/${name}/labels`).then(r => r.json())
+  ]);
+  $("reviewClips").innerHTML = evs.length
+    ? `<div class="label" style="margin:.4rem 0">Clips (${evs.length}) — anhören & benennen, dann PDF erzeugen</div>` + clipRowsHTML(evs, labels, name)
+    : "";
+}
+
+function closeReview() { $("review").hidden = true; }
 
 document.querySelectorAll("#rangeToggle button").forEach(b => {
   b.onclick = () => {
