@@ -437,17 +437,29 @@ class SessionAggregator:
         with self._state_lock:
             return self.state.to_dict()
 
-    def recent_levels(self, seconds: float = 120.0) -> list[dict]:
-        """Letzte Pegel für den Dashboard-Graphen (aus SQLite, dezimiert)."""
+    def recent_levels(self, seconds: float = 120.0, buckets: int = 600) -> list[dict]:
+        """Pegel für den Dashboard-Graphen — in ~600 Zeit-Buckets aggregiert.
+
+        Pro Bucket der MAX-Pegel (Peaks bleiben sichtbar) — effizient auch für
+        Tages-/Wochenansicht (Aggregation in SQL, nicht Millionen Zeilen nach Python).
+        """
         if self._conn is None:
             return []
         cutoff = time_mod.time() - seconds
         with self._db_lock:
+            span_row = self._conn.execute(
+                "SELECT MIN(ts), MAX(ts) FROM spl_samples WHERE ts >= ?", (cutoff,)
+            ).fetchone()
+            if not span_row or span_row[0] is None:
+                return []
+            t0, t1 = span_row
+            bucket = max((t1 - t0) / buckets, 1e-6)
             rows = self._conn.execute(
-                "SELECT ts, db FROM spl_samples WHERE ts >= ? ORDER BY ts", (cutoff,)
+                "SELECT AVG(ts), MAX(db) FROM spl_samples WHERE ts >= ? "
+                "GROUP BY CAST((ts - ?) / ? AS INT) ORDER BY 1",
+                (cutoff, t0, bucket),
             ).fetchall()
-        step = max(1, len(rows) // 600)   # max ~600 Punkte
-        return [{"ts": r[0], "db": r[1]} for r in rows[::step]]
+        return [{"ts": r[0], "db": r[1]} for r in rows]
 
     def recent_events(self, limit: int = 20) -> list[dict]:
         """Letzte Audio-Ereignisse für das Dashboard."""

@@ -255,11 +255,10 @@ async def websocket_endpoint(ws: WebSocket):
         while True:
             if _session is not None:
                 snap = _session.snapshot()
-                snap["levels"] = _session.recent_levels(120.0)
                 snap["events"] = _session.recent_events(15)
                 snap["session_name"] = _session.session_name
             else:
-                snap = {"running": False, "levels": [], "events": []}
+                snap = {"running": False, "events": []}
             await ws.send_json(snap)
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, ConnectionError):

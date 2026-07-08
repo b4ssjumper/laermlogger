@@ -27,7 +27,9 @@
   .card .value small { font-size: .9rem; color: var(--muted); font-weight: 400; }
   #currentDb .value { color: var(--accent); font-size: 2.4rem; }
   .wide { grid-column: 1 / -1; }
-  canvas { width: 100%; height: 260px; display: block; }
+  canvas { width: 100%; height: 320px; display: block; }
+  .range button { background: var(--panel); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .3rem .7rem; font-size: .8rem; font-weight: 500; cursor: pointer; }
+  .range button.active { background: var(--accent); color: #06232f; border-color: var(--accent); }
   .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
   button {
     background: var(--accent); color: #06232f; border: 0; border-radius: 8px;
@@ -89,8 +91,17 @@
 </div>
 
 <div class="card wide" style="margin-bottom:1rem">
-  <div class="label" style="margin-bottom:.4rem">Pegelverlauf (letzte 2 Minuten)</div>
-  <canvas id="chart" width="1060" height="260"></canvas>
+  <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.4rem">
+    <span class="label" id="chartLabel">Pegelverlauf (letzte 2 Minuten)</span>
+    <span id="rangeToggle" class="range">
+      <button data-sec="120" class="active">Live</button>
+      <button data-sec="300">5 min</button>
+      <button data-sec="3600">1 Stunde</button>
+      <button data-sec="86400">1 Tag</button>
+      <button data-sec="604800">1 Woche</button>
+    </span>
+  </div>
+  <canvas id="chart" width="1060" height="320"></canvas>
 </div>
 
 <div class="card wide">
@@ -149,31 +160,47 @@ function render(s) {
     ? Object.entries(p).map(([k, v]) => `<span>${k}: <b>${fmt(v)}</b> dB</span>`).join("")
     : "–";
 
-  levels = s.levels || [];
-  drawChart();
   renderEvents(s.events || [], s.session_name);
 }
 
 let curSession = null;
-let sessionLabels = {};   // mp3 -> vom Nutzer vergebenes Label
+let sessionLabels = {};       // mp3 -> vom Nutzer vergebenes Label
+let renderedClips = new Set(); // schon im DOM vorhandene Clips
+let eventsSessionKey = null;
 
+function eventRowHTML(e, session) {
+  const t = new Date(e.ts * 1000).toLocaleTimeString("de-DE");
+  const url = session ? `/api/audio/${session}/${e.mp3}` : "#";
+  const userLabel = sessionLabels[e.mp3] || "";
+  const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
+  return `<div class="ev" data-mp3="${e.mp3}"><span class="t">${t}</span>`
+    + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
+    + `<span class="cat">${e.category || "—"}</span>`
+    + `<audio controls preload="none" src="${url}"></audio>`
+    + pred
+    + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
+    + ` onchange="saveLabel('${e.mp3}', this.value)"></div>`;
+}
+
+// Anfügen statt Neuzeichnen: laufende Audio-Player werden nie zerstört.
 function renderEvents(events, session) {
   curSession = session;
   const el = $("eventClips");
-  if (!events.length) { el.innerHTML = '<span class="muted">Noch keine Ereignisse.</span>'; return; }
-  el.innerHTML = events.map(e => {
-    const t = new Date(e.ts * 1000).toLocaleTimeString("de-DE");
-    const url = session ? `/api/audio/${session}/${e.mp3}` : "#";
-    const userLabel = sessionLabels[e.mp3] || "";
-    const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
-    return `<div class="ev"><span class="t">${t}</span>`
-      + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
-      + `<span class="cat">${e.category || "—"}</span>`
-      + `<audio controls preload="none" src="${url}"></audio>`
-      + pred
-      + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
-      + ` onchange="saveLabel('${e.mp3}', this.value)"></div>`;
-  }).join("");
+  if (session !== eventsSessionKey) {   // neue Session -> Liste zurücksetzen
+    eventsSessionKey = session;
+    renderedClips = new Set();
+    el.innerHTML = '<span class="muted">Noch keine Ereignisse.</span>';
+  }
+  const fresh = events.filter(e => e.mp3 && !renderedClips.has(e.mp3));
+  if (!fresh.length) return;
+  if (!renderedClips.size) el.innerHTML = "";   // Platzhalter entfernen
+  // älteste zuerst prependen -> neueste landet oben
+  fresh.slice().reverse().forEach(e => {
+    el.insertAdjacentHTML("afterbegin", eventRowHTML(e, session));
+    renderedClips.add(e.mp3);
+  });
+  // DOM auf 80 Zeilen begrenzen
+  while (el.children.length > 80) el.removeChild(el.lastElementChild);
 }
 
 async function saveLabel(mp3, label) {
@@ -253,6 +280,20 @@ function setBadge(id, name, ok) {
   el.className = "badge " + (ok ? "ok" : "bad");
 }
 
+let chartRange = 120;   // Sekunden; 0 = gesamte Messung
+const RANGE_LABEL = {120: "Live — letzte 2 Minuten", 300: "letzte 5 Minuten",
+                     3600: "letzte Stunde", 86400: "letzter Tag", 604800: "letzte Woche"};
+
+async function refreshChart() {
+  try {
+    const sec = chartRange || 999999999;
+    const r = await fetch(`/api/levels?seconds=${sec}`);
+    levels = await r.json();
+  } catch (e) { return; }
+  $("chartLabel").textContent = "Pegelverlauf (" + (RANGE_LABEL[chartRange] || "") + ")";
+  drawChart();
+}
+
 function drawChart() {
   const c = $("chart"), ctx = c.getContext("2d");
   ctx.clearRect(0, 0, c.width, c.height);
@@ -260,19 +301,42 @@ function drawChart() {
   const dbs = levels.map(p => p.db);
   const min = Math.floor(Math.min(...dbs) / 10) * 10;
   const max = Math.ceil(Math.max(...dbs) / 10) * 10;
-  const pad = 34, w = c.width - pad - 8, h = c.height - 24;
+  const t0 = levels[0].ts, t1 = levels[levels.length - 1].ts;
+  const pad = 34, w = c.width - pad - 8, h = c.height - 34;
   const x = i => pad + (i / (levels.length - 1)) * w;
   const y = db => 8 + (1 - (db - min) / Math.max(max - min, 1)) * (h - 8);
 
   ctx.strokeStyle = "#2a323c"; ctx.fillStyle = "#8b96a1"; ctx.font = "11px system-ui";
+  ctx.textAlign = "left";
   for (let g = min; g <= max; g += 10) {
     ctx.beginPath(); ctx.moveTo(pad, y(g)); ctx.lineTo(pad + w, y(g)); ctx.stroke();
     ctx.fillText(g, 4, y(g) + 4);
+  }
+  // Zeitachse: 5 Beschriftungen
+  const span = t1 - t0;
+  const fmtT = ts => {
+    const d = new Date(ts * 1000);
+    return span > 86400 ? d.toLocaleString("de-DE", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})
+         : d.toLocaleTimeString("de-DE", {hour:"2-digit",minute:"2-digit",second: span<600?"2-digit":undefined});
+  };
+  ctx.textAlign = "center";
+  for (let k = 0; k <= 4; k++) {
+    const i = Math.round(k / 4 * (levels.length - 1));
+    ctx.fillText(fmtT(levels[i].ts), x(i), h + 22);
   }
   ctx.strokeStyle = "#4cc2ff"; ctx.lineWidth = 1.6; ctx.beginPath();
   levels.forEach((p, i) => i ? ctx.lineTo(x(i), y(p.db)) : ctx.moveTo(x(i), y(p.db)));
   ctx.stroke(); ctx.lineWidth = 1;
 }
+
+document.querySelectorAll("#rangeToggle button").forEach(b => {
+  b.onclick = () => {
+    chartRange = parseInt(b.dataset.sec);
+    document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
+    b.classList.add("active");
+    refreshChart();
+  };
+});
 
 $("btnStart").onclick = async () => {
   await fetch("/api/session/start", {
@@ -285,9 +349,20 @@ $("btnStop").onclick = async () => {
   if (r.ok) setTimeout(loadSessions, 500);   // Liste unten aktualisieren (PDF-Link)
 };
 
+// Immer nur einen Clip gleichzeitig abspielen (play kapert die anderen)
+document.addEventListener("play", e => {
+  document.querySelectorAll("audio").forEach(a => { if (a !== e.target) a.pause(); });
+}, true);
+
 connect();
 loadSessions();
 loadLabels();
+refreshChart();
+let chartTick = 0;
+setInterval(() => {                       // Live/5min alle 2 s, Tag/Woche alle 30 s
+  chartTick++;
+  if (chartRange < 86400 || chartTick % 15 === 0) refreshChart();
+}, 2000);
 setInterval(loadSessions, 15000);
 setInterval(loadLabels, 15000);
 </script>
