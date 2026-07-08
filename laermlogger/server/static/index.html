@@ -385,18 +385,24 @@ async function openReview(name) {
   $("reviewTitle").textContent = "Messung: " + name;
   $("reviewBody").innerHTML = '<span class="muted">lädt…</span>';
   const [sum, lv] = await Promise.all([
-    fetch(`/api/session/${name}/summary`).then(r => r.json()),
-    fetch(`/api/session/${name}/levels?buckets=900`).then(r => r.json())
+    fetch(`/api/session/${name}/summary`).then(r => r.json()).catch(() => ({})),
+    fetch(`/api/session/${name}/levels?buckets=900`).then(r => r.json()).catch(() => [])
   ]);
+  $("reviewActions").innerHTML =
+      `<a href="/api/report/${name}" target="_blank">📄 PDF erzeugen</a>`
+    + `<a class="csv" href="/api/export/${name}?fmt=csv" target="_blank">CSV</a>`
+    + `<a class="close" href="#" onclick="closeReview();return false">✕ schließen</a>`;
+  if (!sum || !sum.n_samples) {
+    $("reviewBody").innerHTML = '<p class="muted">Diese Messung enthält keine Pegeldaten '
+      + '(vermutlich vor dem ersten Signal gestoppt). Kann gelöscht werden.</p>';
+    $("reviewClips").innerHTML = "";
+    return;
+  }
   const p = sum.percentiles || {};
   const rate = (r, lbl) => r ? `<div class="rv-row"><b>${lbl}</b> Lr ${r.rating_level_db} dB / Richtwert ${r.limit_db} dB — `
       + (r.exceeds_limit ? `<span style="color:var(--bad)">überschritten</span>` : `<span style="color:var(--ok)">eingehalten</span>`)
       + (r.note ? ` <span class="muted">(${r.note})</span>` : "") + `</div>` : "";
   const started = sum.started ? new Date(sum.started*1000).toLocaleString("de-DE") : "—";
-  $("reviewActions").innerHTML =
-      `<a href="/api/report/${name}" target="_blank">📄 PDF erzeugen</a>`
-    + `<a class="csv" href="/api/export/${name}?fmt=csv" target="_blank">CSV</a>`
-    + `<a class="close" href="#" onclick="closeReview();return false">✕ schließen</a>`;
   $("reviewBody").innerHTML =
       `<div class="rv-grid">`
     + `<div><span class="label">LAeq</span><div class="rv-val">${sum.laeq_db ?? "–"} dB</div></div>`
