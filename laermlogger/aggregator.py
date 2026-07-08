@@ -424,8 +424,11 @@ class SessionAggregator:
             with self._state_lock:
                 self.state.audio_ok = True
                 self.state.current_category = cls.category
+                # nur ausreichend sichere Klassen anzeigen (keine Rate-Prozente)
+                conf = self.cfg.classifier.min_confidence
                 self.state.current_top = [
-                    {"name": nm, "score": round(sc, 3)} for nm, sc in cls.top_classes[:3]
+                    {"name": nm, "score": round(sc, 3)}
+                    for nm, sc in cls.top_classes[:3] if sc >= conf
                 ]
                 if cls.impulsive:
                     self.state.impulse_events += 1

@@ -46,7 +46,11 @@ class ClassifierConfig:
     source_map_path: str = str(MODELS_DIR / "quellen_mapping.yaml")
     window_seconds: float = 0.96  # YAMNet-Fenster
     top_k: int = 5
-    min_score: float = 0.2        # Mindest-Score, sonst "unbestimmt"
+    min_score: float = 0.2        # Mindest-Score für Mapping-Kandidaten
+    # Erst ab dieser Konfidenz wird eine konkrete Lärmquelle angezeigt,
+    # sonst "Sonstiges" — verhindert scheinpräzise Fehlvermutungen bei
+    # schwachem/mehrdeutigem Signal.
+    min_confidence: float = 0.35
 
 
 @dataclass

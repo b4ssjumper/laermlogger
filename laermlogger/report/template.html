@@ -80,15 +80,22 @@
 <div class="muted">Richtwerte konfiguriert für: allgemeines Wohngebiet (TA Lärm Nr. 6.1). Nacht: lauteste volle Stunde maßgeblich.
 Impuls-/Tonhaltigkeit automatisch aus dem Audiosignal detektiert{% if impulse_detected or tonal_detected %} — Zuschläge angewendet{% endif %}.</div>
 
-<h2>4. Geräuschquellen (Audio-Klassifizierung)</h2>
+<h2>4. Geräuschquellen</h2>
 {% if shares %}
 <table>
-  <tr><th>Lärmquelle</th><th class="num">Zeitanteil</th><th class="num">Fenster (à ~1 s)</th></tr>
+  <tr><th>Lärmquelle</th><th class="num">Anteil</th>
+      <th class="num">{% if shares_from_events %}Ereignisse{% else %}Fenster (à ~1 s){% endif %}</th></tr>
   {% for s in shares %}
   <tr><td>{{ s.category }}</td><td class="num">{{ "%.1f"|format(s.share * 100) }} %</td><td class="num">{{ s.windows }}</td></tr>
   {% endfor %}
 </table>
-<div class="muted">Automatische Klassifizierung (YAMNet / AudioSet, 521 Klassen, gemappt auf Kategorien) auf Basis des AC-Signalausgangs des Messgeräts.</div>
+{% if shares_from_events %}
+<div class="muted">Verteilung der aufgezeichneten Ereignis-Clips (laute Momente) nach Quelle —
+mit der jeweils besten Bezeichnung: manuelle Benennung, sonst trainiertes Modell, sonst automatische Erkennung.</div>
+{% else %}
+<div class="muted">Automatische Klassifizierung (YAMNet / AudioSet) über die Messzeit. Nur ausreichend
+sichere Zuordnungen; Unsicheres zählt als „Sonstiges".</div>
+{% endif %}
 {% else %}
 <p class="muted">Keine Audio-Klassifizierung verfügbar (Audiopfad war während der Messung nicht aktiv).</p>
 {% endif %}

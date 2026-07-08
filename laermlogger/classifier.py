@@ -114,15 +114,16 @@ class YamnetClassifier:
         top_idx = np.argsort(scores)[::-1][: self.cfg.top_k]
         top = [(self.class_names[i], float(scores[i])) for i in top_idx]
 
-        # Kategorie: bestbewertete gemappte Klasse oberhalb der Schwelle;
-        # "Stille/Hintergrund" nur wenn nichts anderes anschlägt
+        # Kategorie: bestbewertete gemappte Klasse — aber nur, wenn sie
+        # ausreichend sicher ist. Sonst "Sonstiges" (keine Scheinpräzision).
         category = FALLBACK_CATEGORY
         for name, score in top:
             if score < self.cfg.min_score:
                 break
             cat = self._map_category(name)
             if cat != "Stille/Hintergrund":
-                category = cat
+                # nur übernehmen, wenn Konfidenz hoch genug
+                category = cat if score >= self.cfg.min_confidence else FALLBACK_CATEGORY
                 break
             category = cat
 

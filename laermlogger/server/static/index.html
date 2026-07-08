@@ -63,6 +63,9 @@
   .sess a { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 6px; padding: .2rem .7rem; font-size: .82rem; }
   .sess a.csv { color: var(--muted); border-color: var(--border); }
   .sess a.del { color: var(--bad); border-color: var(--bad); }
+  .sess a.clips { color: var(--ok); border-color: var(--ok); }
+  .clipbox { padding-left: 1rem; }
+  .clipbox:not(:empty) { margin: .3rem 0 1rem; border-left: 2px solid var(--border); }
   .perc { display: flex; gap: 1rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
   .perc span b { color: var(--text); }
   #category .value { font-size: 1.25rem; }
@@ -203,14 +206,39 @@ function renderEvents(events, session) {
   while (el.children.length > 80) el.removeChild(el.lastElementChild);
 }
 
-async function saveLabel(mp3, label) {
-  if (!curSession) return;
-  sessionLabels[mp3] = label;
+async function saveLabel(mp3, label, session) {
+  session = session || curSession;
+  if (!session) return;
+  if (session === curSession) sessionLabels[mp3] = label;
   await fetch("/api/label", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ session: curSession, mp3, label })
+    body: JSON.stringify({ session, mp3, label })
   });
   loadLabels();
+}
+
+// Clip-Browser einer (auch abgeschlossenen) Messung: alle Clips anhören & benennen
+async function toggleClips(name) {
+  const box = $("clips-" + name);
+  if (box.innerHTML) { box.innerHTML = ""; return; }
+  box.innerHTML = '<span class="muted">lädt…</span>';
+  const [evs, labels] = await Promise.all([
+    fetch(`/api/session/${name}/events`).then(r => r.json()),
+    fetch(`/api/session/${name}/labels`).then(r => r.json())
+  ]);
+  if (!evs.length) { box.innerHTML = '<span class="muted">Keine Clips in dieser Messung.</span>'; return; }
+  box.innerHTML = evs.map(e => {
+    const t = new Date(e.ts * 1000).toLocaleString("de-DE");
+    const userLabel = labels[e.mp3] || "";
+    const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
+    return `<div class="ev"><span class="t">${t}</span>`
+      + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
+      + `<span class="cat">${e.category || "—"}</span>`
+      + `<audio controls preload="none" src="/api/audio/${name}/${e.mp3}"></audio>`
+      + pred
+      + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
+      + ` onchange="saveLabel('${e.mp3}', this.value, '${name}')"></div>`;
+  }).join("");
 }
 
 async function loadLabels() {
@@ -258,11 +286,15 @@ async function loadSessions() {
       const start = s.started ? new Date(s.started * 1000).toLocaleString("de-DE") : "—";
       const mins = (s.started && s.ended) ? Math.round((s.ended - s.started) / 60) : null;
       const dur = mins != null ? `${mins} min` : (s.ended ? "" : "läuft…");
+      const clipsBtn = s.n_events > 0
+        ? `<a class="clips" href="#" onclick="toggleClips('${s.name}');return false">🎧 ${s.n_events} Clips labeln</a>` : "";
       return `<div class="sess"><span class="nm">${s.name}</span>`
         + `<span class="meta">${start} · ${dur} · ${s.n_samples} Werte · ${s.n_events} Ereignisse</span>`
+        + clipsBtn
         + `<a href="/api/report/${s.name}" target="_blank">PDF</a>`
         + `<a class="csv" href="/api/export/${s.name}?fmt=csv" target="_blank">CSV</a>`
-        + `<a class="del" href="#" onclick="deleteSession('${s.name}');return false">Löschen</a></div>`;
+        + `<a class="del" href="#" onclick="deleteSession('${s.name}');return false">Löschen</a></div>`
+        + `<div id="clips-${s.name}" class="clipbox"></div>`;
     }).join("");
   } catch (e) { /* ignore */ }
 }

@@ -239,14 +239,38 @@ def _load_audio_events(db_path: Path) -> list[dict]:
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT ts, peak_db, category, mp3_path FROM events ORDER BY peak_db DESC"
+            "SELECT ts, peak_db, category, mp3_path, custom_label "
+            "FROM events ORDER BY peak_db DESC"
         ).fetchall()
     except sqlite3.OperationalError:
-        return []
+        try:
+            rows = [(r[0], r[1], r[2], r[3], "") for r in conn.execute(
+                "SELECT ts, peak_db, category, mp3_path FROM events "
+                "ORDER BY peak_db DESC")]
+        except sqlite3.OperationalError:
+            return []
     finally:
         conn.close()
     return [{"start": datetime.fromtimestamp(r[0]), "peak_db": r[1],
-             "category": r[2], "mp3": r[3]} for r in rows]
+             "category": r[2], "mp3": r[3], "custom_label": r[4]} for r in rows]
+
+
+def _event_source_shares(db_path: Path, cfg: Config, events: list[dict]) -> list[dict]:
+    """Lärmquellen-Verteilung aus den Ereignis-Clips mit der jeweils besten
+    verfügbaren Bezeichnung: Nutzer-Label > trainiertes Modell > YAMNet-Kategorie."""
+    from .. import custom_sounds
+
+    if not events:
+        return []
+    user_labels = custom_sounds.labels_for_session(cfg, db_path.stem)
+    counts: Counter = Counter()
+    for e in events:
+        best = (user_labels.get(e["mp3"]) or e.get("custom_label")
+                or e.get("category") or "Sonstiges")
+        counts[best] += 1
+    total = sum(counts.values()) or 1
+    return [{"category": c, "share": n / total, "windows": n}
+            for c, n in counts.most_common()]
 
 
 def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Path:
@@ -276,6 +300,11 @@ def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Pa
 
     # Aufgezeichnete Audio-Clips laden
     audio_events = _load_audio_events(db_path)
+    # Lärmquellen bevorzugt aus den (ggf. gelabelten) Ereignis-Clips,
+    # sonst aus der Sekunden-Klassifikation
+    event_shares = _event_source_shares(db_path, cfg, audio_events)
+    shares = event_shares if event_shares else _category_shares(data["classifications"])
+    shares_from_events = bool(event_shares)
 
     # Große Visualisierungen nur bei ausreichend langem Zeitraum (> 1 h)
     span_s = float(timestamps[-1] - timestamps[0])
@@ -299,7 +328,8 @@ def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Pa
         chart_b64=_level_chart_png(timestamps, levels, metrics),
         heatmap_b64=heatmap_b64,
         daily_strips_b64=daily_strips_b64,
-        shares=_category_shares(data["classifications"]),
+        shares=shares,
+        shares_from_events=shares_from_events,
         impulse_detected=impulse_detected,
         tonal_detected=tonal_detected,
         audio_fallback_used=audio_fallback_used,
