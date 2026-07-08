@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<style>
+  @page {
+    size: A4; margin: 18mm 16mm 20mm 16mm;
+    @bottom-center { content: "Lärmmessprotokoll — Seite " counter(page) " von " counter(pages); font-size: 8pt; color: #777; }
+  }
+  body { font: 9.5pt/1.45 "DejaVu Sans", sans-serif; color: #1a1a1a; }
+  h1 { font-size: 15pt; margin: 0 0 2mm; }
+  h2 { font-size: 11pt; margin: 6mm 0 2mm; border-bottom: 1.5pt solid #2c5f8a; padding-bottom: 1mm; color: #2c5f8a; }
+  .subtitle { color: #555; margin-bottom: 5mm; }
+  table { border-collapse: collapse; width: 100%; margin: 1.5mm 0; }
+  th, td { border: 0.5pt solid #bbb; padding: 1.2mm 2mm; text-align: left; vertical-align: top; }
+  th { background: #eef3f7; font-weight: 600; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .kv td:first-child { width: 38%; background: #f7f9fa; font-weight: 600; border-color: #ccc; }
+  .pass { color: #1c7a3d; font-weight: 700; }
+  .fail { color: #b22222; font-weight: 700; }
+  .muted { color: #666; font-size: 8.5pt; }
+  img.chart { width: 100%; margin: 2mm 0; }
+  .note { background: #f7f7e8; border: 0.5pt solid #ddd; padding: 2mm 3mm; font-size: 8.5pt; margin-top: 2mm; }
+</style>
+</head>
+<body>
+
+<h1>Lärmmessprotokoll</h1>
+<div class="subtitle">Immissionsschutz / Nachbarschaftslärm — in Anlehnung an TA Lärm / DIN 45645-1</div>
+
+<h2>1. Allgemeine Angaben</h2>
+<table class="kv">
+  <tr><td>Messort</td><td>{{ meta.location or "—" }}</td></tr>
+  <tr><td>Messperson</td><td>{{ meta.operator or "—" }}</td></tr>
+  <tr><td>Messbeginn</td><td>{{ started.strftime("%d.%m.%Y %H:%M:%S") }}</td></tr>
+  <tr><td>Messende</td><td>{{ ended.strftime("%d.%m.%Y %H:%M:%S") if ended else "—" }}</td></tr>
+  <tr><td>Messdauer</td><td>{{ "%.0f"|format(duration_min) }} min</td></tr>
+  <tr><td>Messgerät</td><td>{{ meta.device }} (Klasse 2), Frequenzbewertung: {{ weightings }}, Messbereich: {{ ranges }}</td></tr>
+  <tr><td>Messkette</td><td>Digitaler USB-Livestrom des Messgeräts (kalibrierte Pegel, ~20 Hz){% if shares %} + Analogausgang → USB-Audiointerface (Quellenklassifizierung){% endif %}</td></tr>
+  {% if meta.notes %}<tr><td>Bemerkungen</td><td>{{ meta.notes }}</td></tr>{% endif %}
+</table>
+
+<h2>2. Messergebnisse (Gesamtzeitraum)</h2>
+<table>
+  <tr>
+    <th class="num">LAeq</th><th class="num">LAFmax</th><th class="num">LAFmin</th>
+    {% for name in m.overall.percentiles %}<th class="num">{{ name }}</th>{% endfor %}
+    <th class="num">Messwerte</th>
+  </tr>
+  <tr>
+    <td class="num"><b>{{ "%.1f"|format(m.overall.laeq_db) }} dB</b></td>
+    <td class="num">{{ "%.1f"|format(m.overall.lafmax_db) }} dB</td>
+    <td class="num">{{ "%.1f"|format(m.overall.lafmin_db) }} dB</td>
+    {% for v in m.overall.percentiles.values() %}<td class="num">{{ "%.1f"|format(v) }} dB</td>{% endfor %}
+    <td class="num">{{ m.overall.n_samples }}</td>
+  </tr>
+</table>
+<div class="muted">Überschreitungspegel L<sub>N</sub>: Pegel, der in N % der Messzeit überschritten wurde. L95 ≈ Grundgeräusch.</div>
+
+<img class="chart" src="data:image/png;base64,{{ chart_b64 }}" alt="Pegelverlauf">
+
+<h2>3. Beurteilung nach TA Lärm</h2>
+<table>
+  <tr><th>Zeitraum</th><th class="num">LAeq</th><th class="num">KI (Impuls)</th><th class="num">KT (Ton)</th>
+      <th class="num">Beurteilungspegel L<sub>r</sub></th><th class="num">Richtwert</th><th>Bewertung</th></tr>
+  {% for r in [m.day, m.night] if r %}
+  <tr>
+    <td>{{ r.period }} {% if r.period == "Tag" %}({{ cfg.day_start }}–{{ cfg.night_start }}){% else %}({{ cfg.night_start }}–{{ cfg.day_start }}){% endif %}</td>
+    <td class="num">{{ "%.1f"|format(r.laeq_db) }} dB</td>
+    <td class="num">{{ "%.0f"|format(r.impulse_surcharge_db) }} dB</td>
+    <td class="num">{{ "%.0f"|format(r.tonal_surcharge_db) }} dB</td>
+    <td class="num"><b>{{ "%.1f"|format(r.rating_level_db) }} dB</b></td>
+    <td class="num">{{ "%.0f"|format(r.limit_db) }} dB</td>
+    <td>{% if r.exceeds_limit %}<span class="fail">überschritten (+{{ "%.1f"|format(r.rating_level_db - r.limit_db) }} dB)</span>
+        {% else %}<span class="pass">eingehalten</span>{% endif %}</td>
+  </tr>
+  {% if r.note %}<tr><td colspan="7" class="muted">{{ r.period }}: {{ r.note }}</td></tr>{% endif %}
+  {% endfor %}
+</table>
+<div class="muted">Richtwerte konfiguriert für: allgemeines Wohngebiet (TA Lärm Nr. 6.1). Nacht: lauteste volle Stunde maßgeblich.
+Impuls-/Tonhaltigkeit automatisch aus dem Audiosignal detektiert{% if impulse_detected or tonal_detected %} — Zuschläge angewendet{% endif %}.</div>
+
+<h2>4. Geräuschquellen (Audio-Klassifizierung)</h2>
+{% if shares %}
+<table>
+  <tr><th>Lärmquelle</th><th class="num">Zeitanteil</th><th class="num">Fenster (à ~1 s)</th></tr>
+  {% for s in shares %}
+  <tr><td>{{ s.category }}</td><td class="num">{{ "%.1f"|format(s.share * 100) }} %</td><td class="num">{{ s.windows }}</td></tr>
+  {% endfor %}
+</table>
+<div class="muted">Automatische Klassifizierung (YAMNet / AudioSet, 521 Klassen, gemappt auf Kategorien) auf Basis des AC-Signalausgangs des Messgeräts.</div>
+{% else %}
+<p class="muted">Keine Audio-Klassifizierung verfügbar (Audiopfad war während der Messung nicht aktiv).</p>
+{% endif %}
+
+<h2>5. Pegelereignisse über Tagesrichtwert ({{ "%.0f"|format(cfg.limit_day_db) }} dB)</h2>
+{% if events %}
+<table>
+  <tr><th>Beginn</th><th class="num">Dauer</th><th class="num">Maximalpegel</th></tr>
+  {% for e in events %}
+  <tr><td>{{ e.start.strftime("%d.%m.%Y %H:%M:%S") }}</td>
+      <td class="num">{{ "%.1f"|format(e.duration_s) }} s</td>
+      <td class="num">{{ "%.1f"|format(e.max_db) }} dB</td></tr>
+  {% endfor %}
+</table>
+{% if n_events_total > 50 %}<div class="muted">… und {{ n_events_total - 50 }} weitere Ereignisse (siehe CSV-Export).</div>{% endif %}
+{% else %}
+<p class="muted">Keine Überschreitungen des Tagesrichtwerts im Messzeitraum.</p>
+{% endif %}
+
+{% if audio_events %}
+<h2>6. Aufgezeichnete Geräusch-Clips ({{ audio_events|length }})</h2>
+<p class="muted">Bei jeder Pegelspitze wurde automatisch ein kurzer Audio-Clip (MP3) gespeichert
+und im Dashboard abspielbar abgelegt. Sortiert nach Lautstärke.</p>
+<table>
+  <tr><th>Zeitpunkt</th><th class="num">Spitzenpegel</th><th>Erkannte Quelle</th><th>Clip-Datei</th></tr>
+  {% for e in audio_events[:60] %}
+  <tr><td>{{ e.start.strftime("%d.%m.%Y %H:%M:%S") }}</td>
+      <td class="num">{{ "%.1f"|format(e.peak_db) }} dB</td>
+      <td>{{ e.category or "—" }}</td>
+      <td class="muted">{{ e.mp3 }}</td></tr>
+  {% endfor %}
+</table>
+{% if audio_events|length > 60 %}<div class="muted">… und {{ audio_events|length - 60 }} weitere Clips.</div>{% endif %}
+{% endif %}
+
+{% if heatmap_b64 %}
+<div style="page-break-before: always"></div>
+<h2>7. Lärmkarte — wann ist es laut?</h2>
+<p class="muted">Jede Zelle zeigt den energieäquivalenten Dauerschallpegel (LAeq) einer Stunde.
+Rot/gelb = laute Stunden, blau = ruhig. So werden wiederkehrende Muster (z.B. jeden Abend, nachts)
+auf einen Blick sichtbar.</p>
+<img class="chart" src="data:image/png;base64,{{ heatmap_b64 }}" alt="Stunde-Tag-Heatmap">
+{% endif %}
+
+{% if daily_strips_b64 %}
+<div style="page-break-before: always"></div>
+<h2>8. Tagesverläufe im Detail</h2>
+<p class="muted">Ein Streifen pro Tag über 24 Stunden. Graue Flächen = Nachtzeit (22–06 Uhr),
+grün gestrichelt = Tagesrichtwert, rot gepunktet = Nachtrichtwert.</p>
+<img class="chart" src="data:image/png;base64,{{ daily_strips_b64 }}" alt="Tagesverläufe">
+{% endif %}
+
+{% if audio_fallback_used %}
+<div class="note" style="background:#fdeeee;border-color:#d9a0a0">
+<b>Achtung — Audio-Fallback:</b> Für diese Messung stammen die Pegelwerte ganz oder teilweise
+aus dem kalibrierten Analogsignal (Offset-Kalibrierung gegen die Geräteanzeige), nicht aus dem
+digitalen Messwertstrom des SL322. Die Genauigkeit ist entsprechend eingeschränkt; der
+Kalibrier-Offset gilt nur für den beim Abgleich eingestellten Messbereich.
+</div>
+{% endif %}
+{% if include_methodology_note %}
+<div class="note">
+<b>Methodik:</b> Kontinuierliche Erfassung der A-bewerteten Schallpegel (Fast-Bewertung, ~20 Hz)
+über den kalibrierten Messwertausgang des Geräts; LAeq energetisch gemittelt. Die Stärke dieser
+Messung liegt in der lückenlosen, zeitgestempelten Dokumentation von Häufigkeit und Uhrzeit der
+Überschreitungen. Die Geräuschquellen-Erkennung erfolgt automatisch und dient der Einordnung.
+Gerät: {{ meta.device }} (Klasse 2, IEC 61672-1) — geeignet für orientierende und dokumentierende
+Messungen; eine rechtsverbindliche Beurteilung nach TA Lärm setzt eine Messung durch eine anerkannte
+Messstelle mit Klasse-1-Technik voraus, die dieses Protokoll veranlassen kann.
+</div>
+{% endif %}
+
+<p class="muted" style="margin-top:4mm">Erstellt am {{ created.strftime("%d.%m.%Y %H:%M") }} mit Lärmlogger v{{ version }}.</p>
+
+</body>
+</html>

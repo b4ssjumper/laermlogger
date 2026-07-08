@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+build/
+dist/
+
+# Laufzeitdaten (Messungen, Clips, Reports)
+data/
+config.json
+
+# Große Modelldateien (per Skript herunterladbar, siehe README)
+models/*.tflite
+
+# Referenz-Downloads (fremde Software/Archive)
+reference/*.zip
+
+# OS
+.DS_Store
+
+# Claude Code lokale Settings
+.claude/settings.local.json

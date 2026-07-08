@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lärmlogger — PeakTech 8005</title>
+<style>
+  :root {
+    --bg: #101418; --panel: #1a2027; --border: #2a323c;
+    --text: #e6e9ec; --muted: #8b96a1;
+    --accent: #4cc2ff; --ok: #45c98c; --warn: #e8b93e; --bad: #e85d5d;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, sans-serif;
+    padding: 1.2rem; max-width: 1100px; margin: 0 auto;
+  }
+  h1 { font-size: 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: .6rem; }
+  h1 .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--muted); }
+  h1 .dot.live { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .8rem; margin-bottom: 1rem; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: .8rem 1rem; }
+  .card .label { color: var(--muted); font-size: .75rem; text-transform: uppercase; letter-spacing: .05em; }
+  .card .value { font-size: 1.7rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .value small { font-size: .9rem; color: var(--muted); font-weight: 400; }
+  #currentDb .value { color: var(--accent); font-size: 2.4rem; }
+  .wide { grid-column: 1 / -1; }
+  canvas { width: 100%; height: 260px; display: block; }
+  .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+  button {
+    background: var(--accent); color: #06232f; border: 0; border-radius: 8px;
+    padding: .55rem 1.2rem; font-size: .95rem; font-weight: 600; cursor: pointer;
+  }
+  button.stop { background: var(--bad); color: #fff; }
+  button:disabled { opacity: .4; cursor: default; }
+  input {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: .5rem .7rem; font-size: .9rem;
+  }
+  .badge { padding: .15rem .6rem; border-radius: 99px; font-size: .78rem; border: 1px solid var(--border); color: var(--muted); }
+  .badge.ok { color: var(--ok); border-color: var(--ok); }
+  .badge.bad { color: var(--bad); border-color: var(--bad); }
+  #topClasses { font-size: .82rem; color: var(--muted); }
+  .ev { display: flex; align-items: center; gap: .8rem; padding: .5rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .ev:last-child { border-bottom: 0; }
+  .ev .t { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 6.5rem; }
+  .ev .db { font-weight: 600; color: var(--accent); min-width: 4rem; font-variant-numeric: tabular-nums; }
+  .ev .cat { min-width: 8rem; }
+  .ev audio { height: 2rem; max-width: 100%; }
+  .sess { display: flex; align-items: center; gap: .8rem; padding: .5rem 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .sess:last-child { border-bottom: 0; }
+  .sess .nm { font-variant-numeric: tabular-nums; }
+  .sess .meta { color: var(--muted); font-size: .82rem; }
+  .sess a { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 6px; padding: .2rem .7rem; font-size: .82rem; }
+  .sess a.csv { color: var(--muted); border-color: var(--border); }
+  .perc { display: flex; gap: 1rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
+  .perc span b { color: var(--text); }
+  #category .value { font-size: 1.25rem; }
+</style>
+</head>
+<body>
+<h1><span class="dot" id="liveDot"></span> Lärmlogger <span style="color:var(--muted);font-weight:400">— PeakTech 8005</span></h1>
+
+<div class="row">
+  <input id="location" placeholder="Messort">
+  <input id="operator" placeholder="Messperson">
+  <button id="btnStart">▶ Messung starten</button>
+  <button id="btnStop" class="stop" disabled>■ Stopp</button>
+  <span class="badge" id="serialBadge">Seriell: –</span>
+  <span class="badge" id="audioBadge">Audio: –</span>
+  <span class="badge" id="clock">–</span>
+</div>
+
+<div class="grid">
+  <div class="card" id="currentDb"><div class="label">Aktueller Pegel</div><div class="value">–<small> dB(A)</small></div></div>
+  <div class="card" id="laeq"><div class="label">LAeq (laufend)</div><div class="value">–<small> dB</small></div></div>
+  <div class="card" id="lafmax"><div class="label">LAFmax</div><div class="value">–<small> dB</small></div></div>
+  <div class="card" id="lafmin"><div class="label">LAFmin</div><div class="value">–<small> dB</small></div></div>
+  <div class="card" id="category"><div class="label">Lärmquelle</div><div class="value">–</div><div id="topClasses"></div></div>
+  <div class="card" id="events"><div class="label">Ereignisse</div><div class="value" style="font-size:1.05rem">Impuls: <b id="nImp">0</b> · Ton: <b id="nTon">0</b></div></div>
+</div>
+
+<div class="card wide" style="margin-bottom:1rem">
+  <div class="label" style="margin-bottom:.4rem">Pegelverlauf (letzte 2 Minuten)</div>
+  <canvas id="chart" width="1060" height="260"></canvas>
+</div>
+
+<div class="card wide">
+  <div class="label" style="margin-bottom:.4rem">Perzentile (Überschreitungspegel)</div>
+  <div class="perc" id="percentiles">–</div>
+</div>
+
+<div class="card wide" style="margin-top:1rem">
+  <div class="label" style="margin-bottom:.4rem">Ereignisse (lauteste Momente — zum Anhören)</div>
+  <div id="events" class="muted">Noch keine Ereignisse.</div>
+</div>
+
+<div class="card wide" style="margin-top:1rem">
+  <div class="label" style="margin-bottom:.4rem">Messungen &amp; Protokolle</div>
+  <div id="sessions" class="muted">–</div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const fmt = v => (v == null || isNaN(v)) ? "–" : v.toFixed(1);
+let levels = [];
+
+function connect() {
+  const ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws");
+  ws.onmessage = ev => render(JSON.parse(ev.data));
+  ws.onclose = () => setTimeout(connect, 2000);
+}
+
+function render(s) {
+  $("liveDot").className = "dot" + (s.running ? " live" : "");
+  $("btnStart").disabled = !!s.running;
+  $("btnStop").disabled = !s.running;
+  $("clock").textContent = new Date().toLocaleTimeString("de-DE");
+  const src = s.level_source || "—";
+  const srcEl = $("serialBadge");
+  srcEl.textContent = `Pegel: ${src === "—" ? "kein Signal" : src}`;
+  srcEl.className = "badge " + (src === "SL322" ? "ok" : (src === "—" ? "bad" : ""));
+  setBadge("audioBadge", "Audio", s.audio_ok);
+
+  $("currentDb").querySelector(".value").innerHTML = fmt(s.current_db) + "<small> dB(A)</small>";
+  $("laeq").querySelector(".value").innerHTML = fmt(s.laeq_db) + "<small> dB</small>";
+  $("lafmax").querySelector(".value").innerHTML = fmt(s.lafmax_db) + "<small> dB</small>";
+  $("lafmin").querySelector(".value").innerHTML = fmt(s.lafmin_db) + "<small> dB</small>";
+  $("category").querySelector(".value").textContent = s.current_category || "–";
+  $("topClasses").textContent = (s.current_top || []).map(t => `${t.name} ${(t.score*100).toFixed(0)}%`).join(" · ");
+  $("nImp").textContent = s.impulse_events ?? 0;
+  $("nTon").textContent = s.tonal_events ?? 0;
+
+  const p = s.percentiles || {};
+  $("percentiles").innerHTML = Object.keys(p).length
+    ? Object.entries(p).map(([k, v]) => `<span>${k}: <b>${fmt(v)}</b> dB</span>`).join("")
+    : "–";
+
+  levels = s.levels || [];
+  drawChart();
+  renderEvents(s.events || [], s.session_name);
+}
+
+function renderEvents(events, session) {
+  const el = $("events");
+  if (!events.length) { el.innerHTML = '<span class="muted">Noch keine Ereignisse.</span>'; return; }
+  el.innerHTML = events.map(e => {
+    const t = new Date(e.ts * 1000).toLocaleTimeString("de-DE");
+    const url = session ? `/api/audio/${session}/${e.mp3}` : "#";
+    return `<div class="ev"><span class="t">${t}</span>`
+      + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
+      + `<span class="cat">${e.category || "—"}</span>`
+      + `<audio controls preload="none" src="${url}"></audio></div>`;
+  }).join("");
+}
+
+async function loadSessions() {
+  try {
+    const r = await fetch("/api/sessions");
+    const list = await r.json();
+    const el = $("sessions");
+    if (!list.length) { el.innerHTML = '<span class="muted">Noch keine Messungen.</span>'; return; }
+    el.innerHTML = list.map(s => {
+      const start = s.started ? new Date(s.started * 1000).toLocaleString("de-DE") : "—";
+      const mins = (s.started && s.ended) ? Math.round((s.ended - s.started) / 60) : null;
+      const dur = mins != null ? `${mins} min` : (s.ended ? "" : "läuft…");
+      return `<div class="sess"><span class="nm">${s.name}</span>`
+        + `<span class="meta">${start} · ${dur} · ${s.n_samples} Werte · ${s.n_events} Ereignisse</span>`
+        + `<a href="/api/report/${s.name}" target="_blank">PDF</a>`
+        + `<a class="csv" href="/api/export/${s.name}?fmt=csv" target="_blank">CSV</a></div>`;
+    }).join("");
+  } catch (e) { /* ignore */ }
+}
+
+function setBadge(id, name, ok) {
+  const el = $(id);
+  el.textContent = `${name}: ${ok ? "OK" : "kein Signal"}`;
+  el.className = "badge " + (ok ? "ok" : "bad");
+}
+
+function drawChart() {
+  const c = $("chart"), ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  if (levels.length < 2) return;
+  const dbs = levels.map(p => p.db);
+  const min = Math.floor(Math.min(...dbs) / 10) * 10;
+  const max = Math.ceil(Math.max(...dbs) / 10) * 10;
+  const pad = 34, w = c.width - pad - 8, h = c.height - 24;
+  const x = i => pad + (i / (levels.length - 1)) * w;
+  const y = db => 8 + (1 - (db - min) / Math.max(max - min, 1)) * (h - 8);
+
+  ctx.strokeStyle = "#2a323c"; ctx.fillStyle = "#8b96a1"; ctx.font = "11px system-ui";
+  for (let g = min; g <= max; g += 10) {
+    ctx.beginPath(); ctx.moveTo(pad, y(g)); ctx.lineTo(pad + w, y(g)); ctx.stroke();
+    ctx.fillText(g, 4, y(g) + 4);
+  }
+  ctx.strokeStyle = "#4cc2ff"; ctx.lineWidth = 1.6; ctx.beginPath();
+  levels.forEach((p, i) => i ? ctx.lineTo(x(i), y(p.db)) : ctx.moveTo(x(i), y(p.db)));
+  ctx.stroke(); ctx.lineWidth = 1;
+}
+
+$("btnStart").onclick = async () => {
+  await fetch("/api/session/start", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ location: $("location").value, operator: $("operator").value })
+  });
+};
+$("btnStop").onclick = async () => {
+  const r = await fetch("/api/session/stop", { method: "POST" });
+  if (r.ok) setTimeout(loadSessions, 500);   // Liste unten aktualisieren (PDF-Link)
+};
+
+connect();
+loadSessions();
+setInterval(loadSessions, 15000);
+</script>
+</body>
+</html>

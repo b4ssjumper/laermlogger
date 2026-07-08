@@ -1,0 +1,115 @@
+# Mapping der AudioSet-Klassen (YAMNet, display_name) auf Lärmquellen-Kategorien
+# für das Messprotokoll. Nicht gelistete Klassen fallen unter "Sonstiges".
+# Matching: exakter display_name; "prefix:"-Einträge matchen auf Namensanfang.
+
+Verkehr:
+  - Vehicle
+  - Car
+  - "Car passing by"
+  - Truck
+  - Bus
+  - Motorcycle
+  - "Traffic noise, roadway noise"
+  - "Air brake"
+  - "Honk, car horn"  # hupen
+  - Train
+  - "Rail transport"
+  - Aircraft
+  - "Aircraft engine"
+  - Helicopter
+  - Skidding
+  - "Tire squeal"
+
+Sprache/Stimmen:
+  - Speech
+  - Conversation
+  - Shout
+  - Yell
+  - "Children shouting"
+  - "Child speech, kid speaking"
+  - Laughter
+  - Crying, sobbing
+  - "Crowd"
+  - "Chatter"
+  - Screaming
+
+Musik:
+  - Music
+  - "Musical instrument"
+  - Singing
+  - "Drum kit"
+  - "Bass drum"
+  - Guitar
+  - Piano
+  - "Loudspeaker"
+  - "Disco"
+
+Hund/Tiere:
+  - Dog
+  - Bark
+  - Howl
+  - "Bow-wow"
+  - Animal
+  - Bird
+  - "Bird vocalization, bird call, bird song"
+  - Rooster
+  - "Livestock, farm animals, working animals"
+
+Baustelle/Maschinen:
+  - "Power tool"
+  - Drill
+  - Hammer
+  - Sawing
+  - "Jackhammer"
+  - "Engine"
+  - "Idling"
+  - "Lawn mower"
+  - "Chainsaw"
+  - "Air compressor"
+  - "Mechanisms"
+  - Tools
+  - "Machine gun"   # Presslufthammer-Fehlklassifikation abfangen
+
+Haushalt/Gebäude:
+  - "Air conditioning"
+  - "Ventilation fan"
+  - Fan
+  - "Vacuum cleaner"
+  - "Washing machine"
+  - "Door"
+  - "Slam"
+  - "Knock"
+  - "Squeak"
+  - "Dishes, pots, and pans"
+
+Sirene/Alarm:
+  - Siren
+  - "Civil defense siren"
+  - "Police car (siren)"
+  - "Ambulance (siren)"
+  - "Fire engine, fire truck (siren)"
+  - Alarm
+  - "Smoke detector, smoke alarm"
+  - "Car alarm"
+  - "Buzzer"
+
+Natur/Wetter:
+  - Wind
+  - "Wind noise (microphone)"
+  - Rain
+  - Thunder
+  - Thunderstorm
+  - "Rustling leaves"
+  - Water
+  - Stream
+
+Stille/Hintergrund:
+  - Silence
+  - "White noise"
+  - "Pink noise"
+  - "Environmental noise"
+  - "Inside, small room"
+  - "Inside, large room or hall"
+  - "Outside, urban or manmade"
+  - "Outside, rural or natural"
+  - Hum

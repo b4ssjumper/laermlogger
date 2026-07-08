@@ -1,0 +1,15 @@
+[Unit]
+Description=Laermlogger Live-Dashboard (SL322 + Audio-Klassifizierung)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/laermlogger
+ExecStart=/home/admin/laermlogger/.venv/bin/laermlogger dashboard
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
