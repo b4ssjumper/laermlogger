@@ -26,6 +26,7 @@ import logging
 import threading
 import time as time_mod
 from dataclasses import dataclass
+from pathlib import Path
 from queue import Queue
 
 import serial
@@ -217,36 +218,42 @@ class Sl322Reader(threading.Thread):
         log.info("SLM-Reader gestartet (Ziel %s, %d Baud)",
                  self.cfg.port, self.cfg.baudrate)
         while not self._stop_event.is_set():
-            port = self._find_port()
-            if port is None:
-                self._sleep(self.RECONNECT_DELAY)
-                continue
             try:
-                self._ser = serial.Serial(port, self.cfg.baudrate,
-                                          timeout=self.cfg.timeout)
-            except (serial.SerialException, OSError) as exc:
-                log.warning("Port %s nicht öffenbar (%s) — neuer Versuch in %.0fs",
-                            port, exc, self.RECONNECT_DELAY)
-                self._sleep(self.RECONNECT_DELAY)
-                continue
-
-            self.connected = True
-            self._decoder = CemDecoder()   # frischer Zustand nach (Wieder-)Verbindung
-            log.info("Verbunden auf %s", port)
-            try:
-                self._read_loop()
-            except (serial.SerialException, OSError) as exc:
-                log.warning("Verbindung verloren (%s) — verbinde neu…", exc)
-            finally:
-                self.connected = False
+                port = self._find_port()
+                if port is None:
+                    self._sleep(self.RECONNECT_DELAY)
+                    continue
                 try:
-                    if self._ser:
-                        self._ser.close()
-                except (serial.SerialException, OSError):
-                    pass
-                self._ser = None
-            if not self._stop_event.is_set():
-                self.reconnects += 1
+                    self._ser = serial.Serial(port, self.cfg.baudrate,
+                                              timeout=self.cfg.timeout)
+                except (serial.SerialException, OSError) as exc:
+                    log.warning("Port %s nicht öffenbar (%s) — neuer Versuch in %.0fs",
+                                port, exc, self.RECONNECT_DELAY)
+                    self._sleep(self.RECONNECT_DELAY)
+                    continue
+
+                self.connected = True
+                self._decoder = CemDecoder()   # frischer Zustand nach (Wieder-)Verbindung
+                log.info("Verbunden auf %s", port)
+                try:
+                    self._read_loop()
+                except (serial.SerialException, OSError) as exc:
+                    log.warning("Verbindung verloren (%s) — verbinde neu…", exc)
+                finally:
+                    self.connected = False
+                    try:
+                        if self._ser:
+                            self._ser.close()
+                    except (serial.SerialException, OSError):
+                        pass
+                    self._ser = None
+                if not self._stop_event.is_set():
+                    self.reconnects += 1
+                    self._sleep(self.RECONNECT_DELAY)
+            except Exception as exc:   # Sicherheitsnetz: Thread darf nie sterben
+                log.error("Unerwarteter Reader-Fehler (%s) — weiter in %.0fs",
+                          exc, self.RECONNECT_DELAY)
+                self.connected = False
                 self._sleep(self.RECONNECT_DELAY)
         log.info("SLM-Reader beendet (%d Samples, %d Reconnects)",
                  self.samples_decoded, self.reconnects)
