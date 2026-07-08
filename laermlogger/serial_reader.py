@@ -170,6 +170,11 @@ class CemDecoder:
 class Sl322Reader(threading.Thread):
     """Liest den Live-Strom des Messgeräts in einem Thread in eine Queue."""
 
+    # Kein Datenempfang länger als diese Zeit -> Verbindung als tot betrachten
+    # (das Gerät streamt sonst durchgehend mit ~20 Hz)
+    STALL_TIMEOUT = 4.0
+    RECONNECT_DELAY = 2.0
+
     def __init__(self, cfg: SerialConfig, out_queue: Queue):
         super().__init__(name="slm-reader", daemon=True)
         self.cfg = cfg
@@ -177,6 +182,8 @@ class Sl322Reader(threading.Thread):
         self._stop_event = threading.Event()
         self._ser: serial.Serial | None = None
         self._decoder = CemDecoder()
+        self.reconnects = 0
+        self.connected = False
 
     @property
     def samples_decoded(self) -> int:
@@ -184,31 +191,80 @@ class Sl322Reader(threading.Thread):
 
     def send_command(self, cmd: int) -> None:
         if self._ser and self._ser.is_open:
-            self._ser.write(bytes([cmd]))
-            self._ser.flush()
+            try:
+                self._ser.write(bytes([cmd]))
+                self._ser.flush()
+            except (serial.SerialException, OSError):
+                pass
 
     def stop(self) -> None:
         self._stop_event.set()
 
-    def run(self) -> None:
-        try:
-            self._ser = serial.Serial(
-                self.cfg.port, self.cfg.baudrate, timeout=self.cfg.timeout
-            )
-        except serial.SerialException as exc:
-            log.error("Serieller Port %s nicht verfügbar: %s", self.cfg.port, exc)
-            return
+    def _find_port(self) -> str | None:
+        """Konfigurierten Port bevorzugen; sonst irgendeinen USB-Seriell-Port suchen.
 
-        log.info("SLM-Reader gestartet auf %s (%d Baud)",
+        Nach einer USB-Neuanmeldung kann sich der Name ändern (ttyUSB0 -> ttyUSB1).
+        """
+        import glob
+
+        if Path(self.cfg.port).exists():
+            return self.cfg.port
+        candidates = sorted(glob.glob("/dev/ttyUSB*") + glob.glob("/dev/ttyACM*"))
+        return candidates[0] if candidates else None
+
+    def run(self) -> None:
+        """Verbindungs-Loop: bei Verlust automatisch neu verbinden, endlos."""
+        log.info("SLM-Reader gestartet (Ziel %s, %d Baud)",
                  self.cfg.port, self.cfg.baudrate)
-        try:
-            while not self._stop_event.is_set():
-                data = self._ser.read(256)
+        while not self._stop_event.is_set():
+            port = self._find_port()
+            if port is None:
+                self._sleep(self.RECONNECT_DELAY)
+                continue
+            try:
+                self._ser = serial.Serial(port, self.cfg.baudrate,
+                                          timeout=self.cfg.timeout)
+            except (serial.SerialException, OSError) as exc:
+                log.warning("Port %s nicht öffenbar (%s) — neuer Versuch in %.0fs",
+                            port, exc, self.RECONNECT_DELAY)
+                self._sleep(self.RECONNECT_DELAY)
+                continue
+
+            self.connected = True
+            self._decoder = CemDecoder()   # frischer Zustand nach (Wieder-)Verbindung
+            log.info("Verbunden auf %s", port)
+            try:
+                self._read_loop()
+            except (serial.SerialException, OSError) as exc:
+                log.warning("Verbindung verloren (%s) — verbinde neu…", exc)
+            finally:
+                self.connected = False
+                try:
+                    if self._ser:
+                        self._ser.close()
+                except (serial.SerialException, OSError):
+                    pass
+                self._ser = None
+            if not self._stop_event.is_set():
+                self.reconnects += 1
+                self._sleep(self.RECONNECT_DELAY)
+        log.info("SLM-Reader beendet (%d Samples, %d Reconnects)",
+                 self.samples_decoded, self.reconnects)
+
+    def _read_loop(self) -> None:
+        last_data = time_mod.monotonic()
+        while not self._stop_event.is_set():
+            data = self._ser.read(256)
+            if data:
+                last_data = time_mod.monotonic()
                 for sample in self._decoder.feed(data):
                     self.out_queue.put(sample)
-        finally:
-            self._ser.close()
-            log.info("SLM-Reader beendet (%d Samples)", self.samples_decoded)
+            elif time_mod.monotonic() - last_data > self.STALL_TIMEOUT:
+                # Gerät streamt normal durchgehend -> längere Stille = Verbindung tot
+                raise serial.SerialException("keine Daten (Stall-Timeout)")
+
+    def _sleep(self, seconds: float) -> None:
+        self._stop_event.wait(seconds)
 
 
 def dump_raw(port: str, baudrate: int = 9600, seconds: float = 10.0) -> bytes:
