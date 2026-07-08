@@ -31,6 +31,8 @@ class Classification:
     impulsive: bool = False
     tonal: bool = False
     tonal_freq_hz: float | None = None
+    scores: "np.ndarray | None" = None   # voller 521-dim Score-Vektor (Fingerabdruck)
+    custom_label: str | None = None      # Vorhersage des eigenen Modells (falls vorhanden)
 
 
 class YamnetClassifier:
@@ -100,6 +102,7 @@ class YamnetClassifier:
         return Classification(
             timestamp=timestamp, category=category, top_classes=top,
             impulsive=impulsive, tonal=tonal, tonal_freq_hz=tonal_freq,
+            scores=scores.astype("float32"),
         )
 
 

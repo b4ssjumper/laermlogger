@@ -27,7 +27,10 @@ def get_config() -> Config:
 
 @app.get("/", response_class=HTMLResponse)
 async def index():
-    return (STATIC_DIR / "index.html").read_text()
+    return HTMLResponse(
+        (STATIC_DIR / "index.html").read_text(),
+        headers={"Cache-Control": "no-store, must-revalidate"},
+    )
 
 
 @app.post("/api/session/start")
@@ -125,6 +128,34 @@ async def session_events(session_name: str):
     c.close()
     return [{"ts": r[0], "peak_db": r[1], "category": r[2], "mp3": r[3]}
             for r in rows]
+
+
+@app.delete("/api/session/{session_name}")
+async def delete_session(session_name: str):
+    """Session komplett löschen: SQLite, PDF/CSV/JSON und Audio-Clips."""
+    import shutil
+
+    if "/" in session_name or ".." in session_name:
+        raise HTTPException(400, "ungültiger Name")
+    if _session is not None and _session.state.running \
+            and _session.session_name == session_name:
+        raise HTTPException(409, "Laufende Messung kann nicht gelöscht werden")
+    base = Path(_cfg.db_dir)
+    db_path = base / f"{session_name}.sqlite"
+    if not db_path.exists():
+        raise HTTPException(404, "Session nicht gefunden")
+    removed = []
+    for suffix in (".sqlite", ".pdf", ".csv", ".json"):
+        p = base / f"{session_name}{suffix}"
+        if p.exists():
+            p.unlink()
+            removed.append(p.name)
+    clip_dir = base / session_name
+    if clip_dir.is_dir():
+        shutil.rmtree(clip_dir)
+        removed.append(f"{session_name}/ (Clips)")
+    log.info("Session %s gelöscht: %s", session_name, ", ".join(removed))
+    return {"deleted": session_name, "files": removed}
 
 
 @app.get("/api/export/{session_name}")

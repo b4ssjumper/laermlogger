@@ -54,6 +54,7 @@
   .sess .meta { color: var(--muted); font-size: .82rem; }
   .sess a { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 6px; padding: .2rem .7rem; font-size: .82rem; }
   .sess a.csv { color: var(--muted); border-color: var(--border); }
+  .sess a.del { color: var(--bad); border-color: var(--bad); }
   .perc { display: flex; gap: 1rem; flex-wrap: wrap; font-variant-numeric: tabular-nums; }
   .perc span b { color: var(--text); }
   #category .value { font-size: 1.25rem; }
@@ -78,7 +79,7 @@
   <div class="card" id="lafmax"><div class="label">LAFmax</div><div class="value">–<small> dB</small></div></div>
   <div class="card" id="lafmin"><div class="label">LAFmin</div><div class="value">–<small> dB</small></div></div>
   <div class="card" id="category"><div class="label">Lärmquelle</div><div class="value">–</div><div id="topClasses"></div></div>
-  <div class="card" id="events"><div class="label">Ereignisse</div><div class="value" style="font-size:1.05rem">Impuls: <b id="nImp">0</b> · Ton: <b id="nTon">0</b></div></div>
+  <div class="card" id="counters"><div class="label">Auffälligkeiten</div><div class="value" style="font-size:1.05rem">Impuls: <b id="nImp">0</b> · Ton: <b id="nTon">0</b></div></div>
 </div>
 
 <div class="card wide" style="margin-bottom:1rem">
@@ -93,7 +94,7 @@
 
 <div class="card wide" style="margin-top:1rem">
   <div class="label" style="margin-bottom:.4rem">Ereignisse (lauteste Momente — zum Anhören)</div>
-  <div id="events" class="muted">Noch keine Ereignisse.</div>
+  <div id="eventClips" class="muted">Noch keine Ereignisse.</div>
 </div>
 
 <div class="card wide" style="margin-top:1rem">
@@ -143,7 +144,7 @@ function render(s) {
 }
 
 function renderEvents(events, session) {
-  const el = $("events");
+  const el = $("eventClips");
   if (!events.length) { el.innerHTML = '<span class="muted">Noch keine Ereignisse.</span>'; return; }
   el.innerHTML = events.map(e => {
     const t = new Date(e.ts * 1000).toLocaleTimeString("de-DE");
@@ -168,9 +169,17 @@ async function loadSessions() {
       return `<div class="sess"><span class="nm">${s.name}</span>`
         + `<span class="meta">${start} · ${dur} · ${s.n_samples} Werte · ${s.n_events} Ereignisse</span>`
         + `<a href="/api/report/${s.name}" target="_blank">PDF</a>`
-        + `<a class="csv" href="/api/export/${s.name}?fmt=csv" target="_blank">CSV</a></div>`;
+        + `<a class="csv" href="/api/export/${s.name}?fmt=csv" target="_blank">CSV</a>`
+        + `<a class="del" href="#" onclick="deleteSession('${s.name}');return false">Löschen</a></div>`;
     }).join("");
   } catch (e) { /* ignore */ }
+}
+
+async function deleteSession(name) {
+  if (!confirm(`Messung „${name}" mit allen Protokollen und Audio-Clips endgültig löschen?`)) return;
+  const r = await fetch(`/api/session/${name}`, { method: "DELETE" });
+  if (r.ok) loadSessions();
+  else alert("Löschen fehlgeschlagen: " + (await r.text()));
 }
 
 function setBadge(id, name, ok) {
