@@ -259,16 +259,25 @@ class Sl322Reader(threading.Thread):
                  self.samples_decoded, self.reconnects)
 
     def _read_loop(self) -> None:
+        # Manche Geräte stoppen ihren Sendemodus nach einer USB-Neuanmeldung und
+        # müssen mit einem Byte "geweckt" werden (0xAC). Nur senden, wenn nach
+        # kurzer Zeit nichts kommt — ein bereits streamendes Gerät nicht stören.
         last_data = time_mod.monotonic()
+        last_trigger = 0.0
         while not self._stop_event.is_set():
             data = self._ser.read(256)
+            now = time_mod.monotonic()
             if data:
-                last_data = time_mod.monotonic()
+                last_data = now
                 for sample in self._decoder.feed(data):
                     self.out_queue.put(sample)
-            elif time_mod.monotonic() - last_data > self.STALL_TIMEOUT:
-                # Gerät streamt normal durchgehend -> längere Stille = Verbindung tot
-                raise serial.SerialException("keine Daten (Stall-Timeout)")
+                continue
+            idle = now - last_data
+            if idle > 1.5 and now - last_trigger > 2.5:
+                self.send_command(CMD_TRANSFER_MEMORY)  # 0xAC — Stream anstoßen
+                last_trigger = now
+            if idle > self.STALL_TIMEOUT:
+                raise serial.SerialException("keine Daten trotz Trigger (Stall)")
 
     def _sleep(self, seconds: float) -> None:
         self._stop_event.wait(seconds)
@@ -277,6 +286,8 @@ class Sl322Reader(threading.Thread):
 def dump_raw(port: str, baudrate: int = 9600, seconds: float = 10.0) -> bytes:
     """Rohbytes mitschneiden — zur Protokoll-Verifikation."""
     with serial.Serial(port, baudrate, timeout=1.0) as ser:
+        ser.write(bytes([CMD_TRANSFER_MEMORY]))  # Sendemodus anstoßen
+        ser.flush()
         deadline = time_mod.monotonic() + seconds
         chunks = []
         while time_mod.monotonic() < deadline:
@@ -289,6 +300,8 @@ def read_live(port: str, baudrate: int = 9600, seconds: float = 5.0) -> list[Spl
     decoder = CemDecoder()
     samples = []
     with serial.Serial(port, baudrate, timeout=0.2) as ser:
+        ser.write(bytes([CMD_TRANSFER_MEMORY]))  # Sendemodus anstoßen
+        ser.flush()
         deadline = time_mod.monotonic() + seconds
         while time_mod.monotonic() < deadline:
             samples.extend(decoder.feed(ser.read(256)))
