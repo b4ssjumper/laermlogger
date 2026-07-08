@@ -85,19 +85,23 @@ async def list_sessions():
 
     out = []
     for f in sorted(Path(_cfg.db_dir).glob("*.sqlite"), reverse=True):
+        # Nur echte Messungen: müssen eine gültige session-Zeile haben.
+        # (schließt z.B. custom_labels.sqlite = Trainings-Labels aus)
         info = {"name": f.stem, "started": None, "ended": None,
-                "n_samples": 0, "n_events": 0}
+                "location": "", "n_samples": 0, "n_events": 0}
         try:
             c = sqlite3.connect(f)
             row = c.execute("SELECT started_at, ended_at, location FROM session "
                             "WHERE id = 1").fetchone()
-            if row:
-                info["started"], info["ended"], info["location"] = row
+            if not row:
+                c.close()
+                continue
+            info["started"], info["ended"], info["location"] = row
             info["n_samples"] = c.execute("SELECT COUNT(*) FROM spl_samples").fetchone()[0]
             info["n_events"] = c.execute("SELECT COUNT(*) FROM events").fetchone()[0]
             c.close()
         except Exception:
-            pass
+            continue   # keine Session-Struktur -> überspringen
         out.append(info)
     return out
 
