@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import sqlite3
+import time
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -234,20 +235,30 @@ def _exceedance_events(timestamps: np.ndarray, levels: np.ndarray,
     return events
 
 
-def session_levels(db_path: Path, buckets: int = 800) -> list[dict]:
-    """Pegelverlauf einer (abgeschlossenen) Session, in ~buckets Zeit-Buckets
-    aggregiert (MAX je Bucket). Für die interaktive Review-Ansicht."""
-    conn = sqlite3.connect(db_path)
+def session_levels(db_path: Path, buckets: int = 800,
+                   seconds: float | None = None) -> list[dict]:
+    """Pegelverlauf einer Session, in ~buckets Zeit-Buckets aggregiert (MAX je
+    Bucket). Ohne `seconds`: ganze Session (Review). Mit `seconds`: nur die
+    letzten N Sekunden (Live-Ansicht der aktiven Messung)."""
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     try:
-        row = conn.execute("SELECT MIN(ts), MAX(ts) FROM spl_samples").fetchone()
+        if seconds is not None:
+            cutoff = time.time() - seconds
+            where, params = "WHERE ts >= ?", [cutoff]
+        else:
+            where, params = "", []
+        row = conn.execute(
+            f"SELECT MIN(ts), MAX(ts) FROM spl_samples {where}", params).fetchone()
         if not row or row[0] is None:
             return []
         t0, t1 = row
         bucket = max((t1 - t0) / buckets, 1e-6)
         rows = conn.execute(
-            "SELECT AVG(ts), MAX(db) FROM spl_samples "
-            "GROUP BY CAST((ts - ?) / ? AS INT) ORDER BY 1", (t0, bucket)
+            f"SELECT AVG(ts), MAX(db) FROM spl_samples {where} "
+            f"GROUP BY CAST((ts - ?) / ? AS INT) ORDER BY 1", params + [t0, bucket]
         ).fetchall()
+    except sqlite3.OperationalError:
+        return []
     finally:
         conn.close()
     return [{"ts": r[0], "db": r[1]} for r in rows]

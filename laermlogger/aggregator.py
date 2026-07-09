@@ -161,6 +161,9 @@ class SessionAggregator:
     def start(self) -> None:
         Path(self.cfg.db_dir).mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        # WAL: erlaubt dem Dashboard-Prozess paralleles Lesen während geschrieben wird
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.executescript(SCHEMA)
         self._conn.execute(
             "INSERT OR REPLACE INTO session (id, started_at, location, operator, notes) "

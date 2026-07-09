@@ -1,15 +1,23 @@
-"""FastAPI-Server: Live-Dashboard + Session-Steuerung + Export-Endpunkte."""
+"""FastAPI-Dashboard (Prozess 2): reiner Leser + Steuerung.
+
+Die Messung läuft im Mess-Daemon (Prozess 1). Kommunikation über zwei Dateien:
+- data/status.json  (Daemon schreibt Live-Status)  -> /api/state, /ws, /api/levels
+- data/control.json (Dashboard schreibt Kommandos) <- /api/session/start|stop
+
+Dadurch ist das Dashboard frei neustartbar, ohne die Messung zu unterbrechen.
+"""
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 
-from ..aggregator import SessionAggregator
 from ..config import Config
 
 log = logging.getLogger(__name__)
@@ -18,11 +26,46 @@ app = FastAPI(title="Lärmlogger")
 STATIC_DIR = Path(__file__).parent / "static"
 
 _cfg = Config.load()
-_session: SessionAggregator | None = None
+_DATA = Path(_cfg.db_dir)
+_STATUS = _DATA / "status.json"
+_CONTROL = _DATA / "control.json"
+_STATUS_STALE_S = 5.0
 
 
 def get_config() -> Config:
     return _cfg
+
+
+def _read_status() -> dict:
+    """status.json lesen; veraltet/fehlt -> Daemon läuft nicht / keine Messung."""
+    try:
+        st = json.loads(_STATUS.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"running": False, "daemon": False}
+    if time.time() - st.get("updated_at", 0) > _STATUS_STALE_S:
+        return {"running": False, "daemon": False}
+    st["daemon"] = True
+    return st
+
+
+def _write_control(command: str, **fields) -> None:
+    """Kommando an den Mess-Daemon schreiben (seq hochzählen)."""
+    seq = 0
+    try:
+        seq = int(json.loads(_CONTROL.read_text()).get("seq", 0))
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        pass
+    payload = {"seq": seq + 1, "command": command, **fields}
+    _DATA.mkdir(parents=True, exist_ok=True)
+    tmp = _CONTROL.with_suffix(".tmp")
+    tmp.write_text(json.dumps(payload))
+    tmp.replace(_CONTROL)
+
+
+def _active_db() -> Path | None:
+    st = _read_status()
+    p = st.get("active_db")
+    return Path(p) if p and Path(p).exists() else None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -35,48 +78,53 @@ async def index():
 
 @app.post("/api/session/start")
 async def start_session(payload: dict | None = None):
-    global _session
-    if _session and _session.state.running:
-        raise HTTPException(409, "Es läuft bereits eine Session")
+    st = _read_status()
+    if not st.get("daemon"):
+        raise HTTPException(503, "Mess-Daemon läuft nicht (laermlogger measure)")
+    if st.get("running"):
+        raise HTTPException(409, "Es läuft bereits eine Messung")
     payload = payload or {}
-    _session = SessionAggregator(
-        _cfg,
+    _write_control(
+        "start",
         location=payload.get("location", ""),
         operator=payload.get("operator", ""),
         notes=payload.get("notes", ""),
+        daily_rollover=bool(payload.get("daily_rollover", False)),
+        threshold_db=payload.get("threshold_db"),
     )
-    await asyncio.to_thread(_session.start)
-    return {"session": _session.session_name}
+    return {"ok": True}
 
 
 @app.post("/api/session/stop")
 async def stop_session():
-    global _session
-    if not _session or not _session.state.running:
-        raise HTTPException(409, "Keine laufende Session")
-    await asyncio.to_thread(_session.stop)
-    return {"session": _session.session_name, "db": str(_session.db_path)}
+    _write_control("stop")
+    return {"ok": True}
 
 
 @app.get("/api/state")
 async def state():
-    if _session is None:
-        return {"running": False}
-    return _session.snapshot()
+    st = _read_status()
+    snap = st.get("snapshot", {"running": False})
+    snap["running"] = st.get("running", False)
+    snap["daemon"] = st.get("daemon", False)
+    snap["session_name"] = st.get("session_name")
+    snap["events"] = st.get("events", [])
+    return snap
 
 
 @app.get("/api/levels")
 async def levels(seconds: float = 120.0):
-    if _session is None:
+    from ..report.protocol import session_levels
+
+    db = _active_db()
+    if db is None:
         return []
-    return _session.recent_levels(seconds)
+    return await asyncio.to_thread(session_levels, db, 600, seconds)
 
 
 @app.get("/api/events")
 async def events(limit: int = 20):
-    if _session is None:
-        return []
-    return _session.recent_events(limit)
+    return _read_status().get("events", [])[:limit]
 
 
 @app.get("/api/sessions")
@@ -167,8 +215,8 @@ async def delete_session(session_name: str):
 
     if "/" in session_name or ".." in session_name:
         raise HTTPException(400, "ungültiger Name")
-    if _session is not None and _session.state.running \
-            and _session.session_name == session_name:
+    st = _read_status()
+    if st.get("running") and st.get("session_name") == session_name:
         raise HTTPException(409, "Laufende Messung kann nicht gelöscht werden")
     base = Path(_cfg.db_dir)
     db_path = base / f"{session_name}.sqlite"
@@ -220,10 +268,9 @@ _training_classifier = None
 
 
 def _get_classifier():
-    """Classifier für Labeln/Trainieren — reuse der laufenden Session oder einmalig laden."""
+    """Classifier fürs Trainieren — einmalig im Dashboard-Prozess laden.
+    Der Mess-Daemon lädt das neu trainierte Modell selbstständig per Datei-mtime."""
     global _training_classifier
-    if _session is not None and getattr(_session, "_classifier", None) is not None:
-        return _session._classifier
     if _training_classifier is None:
         from ..classifier import YamnetClassifier
         _training_classifier = YamnetClassifier(_cfg.classifier)
@@ -267,24 +314,22 @@ async def train_model():
 
     classifier = await asyncio.to_thread(_get_classifier)
     result = await asyncio.to_thread(custom_sounds.train, _cfg, classifier)
-    # laufende Session soll das neue Modell sofort nutzen
-    if _session is not None and _session.state.running:
-        await asyncio.to_thread(_session.reload_custom_model)
+    # Der Mess-Daemon lädt das neue Modell automatisch (Datei-mtime)
     return result
 
 
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    """Pusht Live-State + aktuelle Pegel jede Sekunde."""
+    """Pusht Live-State (aus status.json) jede Sekunde."""
     await ws.accept()
     try:
         while True:
-            if _session is not None:
-                snap = _session.snapshot()
-                snap["events"] = _session.recent_events(15)
-                snap["session_name"] = _session.session_name
-            else:
-                snap = {"running": False, "events": []}
+            st = _read_status()
+            snap = st.get("snapshot", {"running": False})
+            snap["running"] = st.get("running", False)
+            snap["daemon"] = st.get("daemon", False)
+            snap["session_name"] = st.get("session_name")
+            snap["events"] = st.get("events", [])
             await ws.send_json(snap)
             await asyncio.sleep(1.0)
     except (WebSocketDisconnect, ConnectionError):

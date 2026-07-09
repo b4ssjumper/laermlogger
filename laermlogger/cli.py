@@ -3,6 +3,7 @@
   scan-hardware   Seriellen Port + Audiointerface erkennen und testen
   dump            Rohbytes vom SL322 mitschneiden (Protokoll-Verifikation)
   record          Messung ohne Dashboard starten (Ctrl+C beendet)
+  measure         Mess-Daemon (entkoppelt) — vom Dashboard gesteuert
   calibrate       Audio-Pfad gegen die SL322-Anzeige kalibrieren (Fallback)
   dashboard       Live-Dashboard-Server starten
   report          PDF-Protokoll aus einer Session erzeugen
@@ -92,6 +93,13 @@ def cmd_record(cfg: Config, args) -> int:
         print("\nBeende …")
     agg.stop()
     print(f"Session gespeichert: {agg.db_path}")
+    return 0
+
+
+def cmd_measure(cfg: Config, args) -> int:
+    from .daemon import MeasureDaemon
+
+    MeasureDaemon(cfg).run()
     return 0
 
 
@@ -232,6 +240,8 @@ def main() -> int:
     p.add_argument("--notes")
     p.add_argument("--duration", type=float, help="Sekunden, sonst bis Ctrl+C")
 
+    sub.add_parser("measure", help="Mess-Daemon (entkoppelt, vom Dashboard gesteuert)")
+
     sub.add_parser("calibrate", help="Audio-Pfad gegen SL322-Anzeige kalibrieren")
 
     p = sub.add_parser("dashboard", help="Live-Dashboard starten")
@@ -253,6 +263,7 @@ def main() -> int:
         "scan-hardware": cmd_scan_hardware,
         "dump": cmd_dump,
         "record": cmd_record,
+        "measure": cmd_measure,
         "calibrate": cmd_calibrate,
         "dashboard": cmd_dashboard,
         "report": cmd_report,
