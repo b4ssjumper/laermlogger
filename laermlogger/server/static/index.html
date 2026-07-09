@@ -89,11 +89,16 @@
   <input id="operator" placeholder="Messperson">
   <label class="opt">Schwelle <input id="threshold" type="number" value="60" min="30" max="130" style="width:4rem"> dB</label>
   <label class="opt"><input id="rollover" type="checkbox"> Tageswechsel um Mitternacht</label>
-  <button id="btnStart">▶ Messung starten</button>
+  <button id="btnStart" title="Startet die Aufzeichnung im Hintergrund-Messdienst (läuft ohne Browser/SSH weiter)">▶ Messung starten</button>
   <button id="btnStop" class="stop" disabled>■ Stopp</button>
+  <span class="badge" id="daemonBadge" title="Hintergrund-Messdienst (systemd: laermlogger-measure)">Messdienst: –</span>
   <span class="badge" id="serialBadge">Seriell: –</span>
   <span class="badge" id="audioBadge">Audio: –</span>
   <span class="badge" id="clock">–</span>
+</div>
+<div class="muted" style="margin:-.5rem 0 1rem;font-size:.82rem">
+  Die Messung läuft im Hintergrund-Dienst weiter — auch wenn du Browser oder SSH schließt.
+  Der Graph zeigt <b>alle</b> Messwerte; oben rechts schränkst du den Zeitraum ein.
 </div>
 
 <div class="card wide" id="review" hidden style="margin-bottom:1rem;border-color:var(--accent)">
@@ -118,10 +123,10 @@
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.4rem">
     <span class="label" id="chartLabel">Pegelverlauf (letzte 2 Minuten)</span>
     <span id="rangeToggle" class="range">
-      <button data-sec="120" class="active">Live</button>
+      <button data-sec="120">Live</button>
       <button data-sec="300">5 min</button>
       <button data-sec="3600">1 Stunde</button>
-      <button data-sec="86400">1 Tag</button>
+      <button data-sec="86400" class="active">1 Tag</button>
       <button data-sec="604800">1 Woche</button>
     </span>
   </div>
@@ -171,8 +176,12 @@ function connect() {
 
 function render(s) {
   $("liveDot").className = "dot" + (s.running ? " live" : "");
-  $("btnStart").disabled = !!s.running;
+  const daemon = s.daemon !== false;
+  $("btnStart").disabled = !!s.running || !daemon;
   $("btnStop").disabled = !s.running;
+  const dEl = $("daemonBadge");
+  dEl.textContent = "Messdienst: " + (daemon ? (s.running ? "misst" : "bereit") : "AUS");
+  dEl.className = "badge " + (daemon ? "ok" : "bad");
   $("clock").textContent = new Date().toLocaleTimeString("de-DE");
   const src = s.level_source || "—";
   const srcEl = $("serialBadge");
@@ -344,17 +353,18 @@ function setBadge(id, name, ok) {
   el.className = "badge " + (ok ? "ok" : "bad");
 }
 
-let chartRange = 120;   // Sekunden; 0 = gesamte Messung
+let chartRange = 86400;   // Standard: letzter Tag (zeigt sofort Daten)
 const RANGE_LABEL = {120: "Live — letzte 2 Minuten", 300: "letzte 5 Minuten",
                      3600: "letzte Stunde", 86400: "letzter Tag", 604800: "letzte Woche"};
 
 async function refreshChart() {
   try {
     const sec = chartRange || 999999999;
-    const r = await fetch(`/api/levels?seconds=${sec}`);
+    // /api/timeline: durchgehend über ALLE Messungen im Fenster
+    const r = await fetch(`/api/timeline?seconds=${sec}`);
     levels = await r.json();
   } catch (e) { return; }
-  $("chartLabel").textContent = "Pegelverlauf (" + (RANGE_LABEL[chartRange] || "") + ")";
+  $("chartLabel").textContent = "Pegelverlauf — alle Messungen (" + (RANGE_LABEL[chartRange] || "") + ")";
   drawChart($("chart"), levels);
 }
 

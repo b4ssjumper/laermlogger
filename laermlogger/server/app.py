@@ -122,6 +122,48 @@ async def levels(seconds: float = 120.0):
     return await asyncio.to_thread(session_levels, db, 600, seconds)
 
 
+def _sessions_overlapping(cutoff: float) -> list[Path]:
+    """Session-Dateien, deren Zeitraum das Fenster [cutoff, jetzt] berührt."""
+    import sqlite3
+
+    out = []
+    for f in Path(_cfg.db_dir).glob("session_*.sqlite"):
+        try:
+            c = sqlite3.connect(f)
+            row = c.execute("SELECT started_at, ended_at FROM session "
+                            "WHERE id = 1").fetchone()
+            c.close()
+        except Exception:
+            continue
+        if not row or not row[0]:
+            continue
+        end = row[1] or time.time()   # laufende Messung: bis jetzt
+        if end >= cutoff:
+            out.append(f)
+    return sorted(out)
+
+
+@app.get("/api/timeline")
+async def timeline(seconds: float = 120.0):
+    """Durchgehender Pegelverlauf über ALLE Messungen im gewählten Fenster."""
+    from ..report.protocol import session_levels
+
+    cutoff = time.time() - seconds
+    paths = _sessions_overlapping(cutoff)
+    if not paths:
+        return []
+
+    def build():
+        per = max(900 // len(paths), 200)
+        pts: list[dict] = []
+        for p in paths:
+            pts.extend(session_levels(p, per, seconds))
+        pts.sort(key=lambda x: x["ts"])
+        return pts
+
+    return await asyncio.to_thread(build)
+
+
 @app.get("/api/events")
 async def events(limit: int = 20):
     return _read_status().get("events", [])[:limit]
