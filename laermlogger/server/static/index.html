@@ -510,6 +510,7 @@ let clipQ = "";            // aktueller Zeitraum-Filter ("" = alle Daten)
 let clipOffset = 0;
 let showArchive = false;
 let clipSort = "loudest";  // "loudest" | "newest"
+let clipMinDb = 0;         // Anzeige-Filter für die Clip-Liste (0 = alle)
 
 async function applyFilter() {
   filterFrom = $("fFrom").value || null;
@@ -544,7 +545,7 @@ async function loadClips(reset) {
     el.innerHTML = `<div id="clipHead" class="row" style="margin:0 0 .5rem"></div>`
       + `<div id="clipRows"></div><div id="clipFoot" style="margin-top:.5rem"></div>`;
   }
-  const d = await fetch(`/api/combine/events?${clipQ}&offset=${clipOffset}&limit=25&include_done=${showArchive}&sort=${clipSort}`)
+  const d = await fetch(`/api/combine/events?${clipQ}&offset=${clipOffset}&limit=25&include_done=${showArchive}&sort=${clipSort}&min_db=${clipMinDb}`)
     .then(r => r.json()).catch(() => ({clips: [], total: 0, remaining: 0}));
   $("clipRows").insertAdjacentHTML("beforeend", clipRowsHTML(d.clips || [], {}, null));
   clipOffset += (d.clips || []).length;
@@ -554,13 +555,38 @@ async function loadClips(reset) {
     + `<span class="opt">Sortieren: <select id="sortSel">`
     +   `<option value="loudest"${clipSort === "loudest" ? " selected" : ""}>lauteste zuerst</option>`
     +   `<option value="newest"${clipSort === "newest" ? " selected" : ""}>neueste zuerst</option></select></span>`
-    + `<label class="opt"><input type="checkbox" id="archToggle" ${showArchive ? "checked" : ""}> Archiv anzeigen</label>`;
+    + `<label class="opt">ab <input type="number" id="clipMin" value="${clipMinDb}" min="0" max="140" step="1" style="width:3.5rem"> dB</label>`
+    + `<label class="opt"><input type="checkbox" id="archToggle" ${showArchive ? "checked" : ""}> Archiv anzeigen</label>`
+    + `<button id="recalcBtn" class="opt" title="Label & Score aller Clips mit dem aktuellen Modell neu berechnen">🔄 neu berechnen</button>`;
   $("sortSel").onchange = e => { clipSort = e.target.value; loadClips(true); };
   $("archToggle").onchange = e => { showArchive = e.target.checked; loadClips(true); };
+  $("clipMin").onchange = e => {
+    clipMinDb = parseFloat(e.target.value) || 0;
+    saveSettings({ clip_filter_db: clipMinDb });
+    loadClips(true);
+  };
+  $("recalcBtn").onclick = recomputeClips;
   $("clipFoot").innerHTML = d.remaining > 0
     ? `<button id="moreBtn">Mehr laden (${d.remaining} übrig)</button>`
     : (clipOffset === 0 ? `<span class="muted">${showArchive ? "Archiv leer." : "Keine offenen Clips 🎉"}</span>` : "");
   if (d.remaining > 0) $("moreBtn").onclick = () => loadClips(false);
+}
+
+async function recomputeClips() {
+  const btn = $("recalcBtn");
+  const scope = clipMinDb ? `ab ${clipMinDb} dB` : "alle";
+  if (!confirm(`Label & Score der Clips (${scope}${clipQ ? " im Zeitraum" : ""}) `
+             + `mit dem aktuellen Modell neu berechnen?\n\n`
+             + `Kann bei vielen Clips einen Moment dauern.`)) return;
+  btn.disabled = true; btn.textContent = "⏳ berechne…";
+  try {
+    const q = `${clipQ}&include_done=${showArchive}&min_db=${clipMinDb}`;
+    const d = await fetch(`/api/recompute?${q}`, { method: "POST" }).then(r => r.json());
+    if (d.ok) alert(`Fertig — ${d.updated} Clips neu bewertet.`);
+    else alert("Nicht möglich: " + (d.reason || "unbekannt"));
+  } catch (e) { alert("Neu-Berechnen fehlgeschlagen."); }
+  btn.disabled = false; btn.textContent = "🔄 neu berechnen";
+  loadClips(true);
 }
 
 $("fApply").onclick = applyFilter;
@@ -646,6 +672,7 @@ async function loadSettings() {
     const s = await fetch("/api/settings").then(r => r.json());
     $("threshold").value = s.threshold_db ?? 60;
     $("rollover").checked = !!s.daily_rollover;
+    clipMinDb = s.clip_filter_db ?? 0;
     labelSet = s.label_set || [];
     renderLabelChips();
     $("labelList").innerHTML = labelSet.map(l => `<option value="${l}">`).join("");
@@ -685,13 +712,13 @@ async function removeLabel(name) {
 
 $("threshold").onchange = () => saveSettings({ threshold_db: parseFloat($("threshold").value) || 60 });
 $("rollover").onchange = () => saveSettings({ daily_rollover: $("rollover").checked });
-loadSettings();
 
 connect();
 loadSessions();
 loadLabels();
 refreshChart();
-loadClips(true);        // Clips sofort zeigen (alle Daten)
+// erst Einstellungen (u.a. Clip-Filter) laden, dann Clips mit dem gespeicherten Filter zeigen
+loadSettings().then(() => loadClips(true));
 let chartTick = 0;
 setInterval(() => {                       // Live/5min alle 2 s, Tag/Woche alle 30 s
   chartTick++;

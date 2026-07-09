@@ -104,6 +104,7 @@ class Config:
     dashboard_port: int = 8000
     daily_rollover: bool = False   # UI-Standard: Tageswechsel um Mitternacht
     label_set: list = field(default_factory=list)  # feste Labels für die Klassifizierung
+    clip_filter_db: float = 0.0    # Anzeige-Filter: nur Clips ab diesem Pegel labeln (0 = alle)
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "Config":

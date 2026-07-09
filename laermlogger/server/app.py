@@ -81,7 +81,8 @@ async def get_settings():
     """Gespeicherte Standardwerte (Schwelle, Tageswechsel, feste Labels)."""
     return {"threshold_db": _cfg.events.threshold_db,
             "daily_rollover": _cfg.daily_rollover,
-            "label_set": _cfg.label_set}
+            "label_set": _cfg.label_set,
+            "clip_filter_db": _cfg.clip_filter_db}
 
 
 @app.post("/api/settings")
@@ -94,6 +95,11 @@ async def save_settings(payload: dict):
             pass
     if "daily_rollover" in payload:
         _cfg.daily_rollover = bool(payload["daily_rollover"])
+    if "clip_filter_db" in payload:
+        try:
+            _cfg.clip_filter_db = float(payload["clip_filter_db"])
+        except (TypeError, ValueError):
+            pass
     if "label_set" in payload and isinstance(payload["label_set"], list):
         # sauber: getrimmt, ohne Leere, ohne Duplikate, Reihenfolge erhalten
         seen, clean = set(), []
@@ -105,7 +111,8 @@ async def save_settings(payload: dict):
         _cfg.label_set = clean
     await asyncio.to_thread(_cfg.save)
     return {"ok": True, "threshold_db": _cfg.events.threshold_db,
-            "daily_rollover": _cfg.daily_rollover, "label_set": _cfg.label_set}
+            "daily_rollover": _cfg.daily_rollover, "label_set": _cfg.label_set,
+            "clip_filter_db": _cfg.clip_filter_db}
 
 
 @app.post("/api/session/start")
@@ -315,6 +322,19 @@ async def combine_levels(from_: str = Query(None, alias="from"), to: str = None,
     return await asyncio.to_thread(combined_levels, paths, buckets)
 
 
+# Fingerabdrücke (YAMNet-Embeddings) je Clip zwischenspeichern — ändern sich nie,
+# nur das Modell darüber. So ist das Neu-Berechnen nach dem Trainieren günstig.
+_embed_cache: dict[tuple[str, str], object] = {}
+
+
+def _clip_feature_cached(clf, session: str, mp3: str):
+    key = (session, mp3)
+    if key not in _embed_cache:
+        from .. import custom_sounds
+        _embed_cache[key] = custom_sounds.clip_feature(_cfg, clf, session, mp3)
+    return _embed_cache[key]
+
+
 def _add_scores(clips: list[dict]) -> list[dict]:
     """Konfidenz-Score der angezeigten Clips mit dem aktuellen Modell nachrechnen
     (für Clips ohne gespeicherten Score, z.B. vor Einführung der Score-Spalte)."""
@@ -328,7 +348,7 @@ def _add_scores(clips: list[dict]) -> list[dict]:
         if c.get("custom_score") or c.get("user_label"):
             continue
         try:
-            feat = custom_sounds.clip_feature(_cfg, clf, c["session"], c["mp3"])
+            feat = _clip_feature_cached(clf, c["session"], c["mp3"])
             if feat is None:
                 continue
             lbl, sim = model.predict(feat)
@@ -339,12 +359,64 @@ def _add_scores(clips: list[dict]) -> list[dict]:
     return clips
 
 
+def _recompute_range(paths: list, min_db: float, include_done: bool) -> dict:
+    """Vorhersage (Label + Score) aller Clips im Zeitraum mit dem AKTUELLEN Modell
+    neu berechnen und dauerhaft in die Session-DBs zurückschreiben."""
+    import sqlite3
+    from .. import custom_sounds
+    from ..report.protocol import _load_audio_events
+
+    model = custom_sounds.CustomModel.load(_cfg)
+    if not model:
+        return {"ok": False, "reason": "kein Modell trainiert", "updated": 0}
+    clf = _get_classifier()
+
+    updated = 0
+    for path in paths:
+        session = path.stem
+        done = custom_sounds.done_for_session(_cfg, session) if not include_done else set()
+        writes = []
+        for e in _load_audio_events(path):
+            mp3 = e["mp3"]
+            if min_db and e["peak_db"] < min_db:
+                continue
+            if mp3 in done:
+                continue
+            feat = _clip_feature_cached(clf, session, mp3)
+            if feat is None:
+                continue
+            lbl, sim = model.predict(feat)
+            writes.append((lbl or "", round(float(sim), 3), mp3))
+        if not writes:
+            continue
+        conn = sqlite3.connect(path, timeout=5.0)
+        try:
+            # ältere Sessions haben die Spalten evtl. noch nicht -> nachrüsten
+            for col, typ in (("custom_label", "TEXT DEFAULT ''"),
+                             ("custom_score", "REAL DEFAULT 0")):
+                try:
+                    conn.execute(f"ALTER TABLE events ADD COLUMN {col} {typ}")
+                except sqlite3.OperationalError:
+                    pass
+            conn.executemany(
+                "UPDATE events SET custom_label=?, custom_score=? WHERE mp3_path=?",
+                writes)
+            conn.commit()
+            updated += len(writes)
+        except sqlite3.OperationalError as exc:
+            log.warning("Recompute: %s gesperrt/übersprungen: %s", session, exc)
+        finally:
+            conn.close()
+    return {"ok": True, "updated": updated}
+
+
 @app.get("/api/combine/events")
 async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
                          offset: int = 0, limit: int = 25, include_done: bool = False,
-                         sort: str = "loudest"):
+                         sort: str = "loudest", min_db: float = 0.0):
     """Ereignis-Clips im Zeitraum, zum Labeln. sort: 'loudest' | 'newest'.
-    Erledigte Clips (Archiv) standardmäßig ausgeblendet. offset/limit = Lazy Loading."""
+    Erledigte Clips (Archiv) standardmäßig ausgeblendet. offset/limit = Lazy Loading.
+    min_db = Anzeige-Filter: nur Clips ab diesem Spitzenpegel."""
     from .. import custom_sounds
     from ..report.protocol import _combined_audio_events
 
@@ -354,6 +426,8 @@ async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
     done_cache: dict = {}
     filtered = []
     for e in events:
+        if min_db and e["peak_db"] < min_db:
+            continue
         s = e["session"]
         if s not in label_cache:
             label_cache[s] = custom_sounds.labels_for_session(_cfg, s)
@@ -530,6 +604,15 @@ async def train_model():
     result = await asyncio.to_thread(custom_sounds.train, _cfg, classifier)
     # Der Mess-Daemon lädt das neue Modell automatisch (Datei-mtime)
     return result
+
+
+@app.post("/api/recompute")
+async def recompute_scores(from_: str = Query(None, alias="from"), to: str = None,
+                           include_done: bool = False, min_db: float = 0.0):
+    """Vorhersage (Label + Score) aller Clips im Zeitraum mit dem aktuellen Modell
+    neu berechnen und in die DBs zurückschreiben. min_db grenzt den Umfang ein."""
+    paths = _sessions_in_range(from_, to)
+    return await asyncio.to_thread(_recompute_range, paths, min_db, include_done)
 
 
 @app.websocket("/ws")
