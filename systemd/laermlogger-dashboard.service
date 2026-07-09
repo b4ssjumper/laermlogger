@@ -1,6 +1,6 @@
 [Unit]
-Description=Laermlogger Live-Dashboard (SL322 + Audio-Klassifizierung)
-After=network-online.target sound.target
+Description=Laermlogger Dashboard (Weboberflaeche) — frei neustartbar, unterbricht Messung nicht
+After=network-online.target laermlogger-measure.service
 Wants=network-online.target
 
 [Service]

@@ -73,14 +73,32 @@ Das Lärmquellen-Mapping ist in `models/quellen_mapping.yaml` anpassbar.
 
 Sessions liegen als SQLite-Dateien in `data/`.
 
+## Architektur: zwei Prozesse (entkoppelt)
+
+- **Mess-Daemon** (`laermlogger measure`) — führt die Messung, schreibt SQLite + Clips
+  und `data/status.json`. Stabil, wird selten neu gestartet.
+- **Dashboard** (`laermlogger dashboard`) — Weboberfläche, liest `status.json` und
+  steuert über `data/control.json`. **Frei neustartbar, ohne die Messung zu unterbrechen.**
+
+So kann man am Dashboard weiterentwickeln/aktualisieren, während eine Langzeitmessung läuft.
+
+## Workflow
+
+1. **Sammeln:** Messung im Dashboard starten (Schwelle + optional „Tageswechsel um
+   Mitternacht" wählen). Läuft im Hintergrund, tage-/wochenlang.
+2. **Auswerten:** Im Dashboard einen **Zeitraum** wählen → Kennwerte + Verlauf ansehen,
+   die **Clips anhören & benennen** (labeln), bei Bedarf **trainieren**.
+3. **Protokoll:** Im Zeitraum **PDF erzeugen** — nutzt deine Labels als Quellen.
+
 ## Dauerbetrieb / Langzeitmessung (z.B. eine Woche)
 
 ```bash
-sudo cp systemd/laermlogger.service /etc/systemd/system/
-sudo systemctl enable --now laermlogger      # Autostart + Neustart bei Absturz/Reboot
+sudo cp systemd/laermlogger-measure.service systemd/laermlogger-dashboard.service /etc/systemd/system/
+sudo systemctl enable --now laermlogger-measure laermlogger-dashboard
 ```
 
-Dann im Browser Messung starten — sie läuft im Hintergrund weiter, auch ohne offenen Browser.
+Beide starten automatisch mit dem Pi und laufen ohne offene SSH-/Browser-Sitzung weiter.
+Dashboard aktualisieren ohne die Messung zu stören: `sudo systemctl restart laermlogger-dashboard`.
 
 **Wichtig am Messgerät für eine Wochenmessung:**
 - **Auto-Power-Off deaktivieren:** Gerät aus, FAST/SLOW-Taste halten und dabei einschalten

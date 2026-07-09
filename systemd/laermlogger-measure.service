@@ -1,0 +1,15 @@
+[Unit]
+Description=Laermlogger Mess-Daemon (PeakTech 8005 + Audio) — stabil, selten neu starten
+After=sound.target
+Wants=sound.target
+
+[Service]
+Type=simple
+User=admin
+WorkingDirectory=/home/admin/laermlogger
+ExecStart=/home/admin/laermlogger/.venv/bin/laermlogger measure
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
