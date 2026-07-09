@@ -156,6 +156,7 @@ class SessionAggregator:
         self._n_events = 0
         self._recent_events: deque = deque(maxlen=50)
         self._events_lock = threading.Lock()
+        self._last_snapshot: dict = {"running": False}   # Fallback für blockierfreies Lesen
         self._custom_model = None   # eigenes Sound-Modell (falls trainiert)
 
     # ------------------------------------------------------------------
@@ -442,8 +443,14 @@ class SessionAggregator:
 
     # ------------------------------------------------------------------
     def snapshot(self) -> dict:
-        with self._state_lock:
-            return self.state.to_dict()
+        # blockierfrei: hängt ein Worker im state_lock, liefern wir den letzten
+        # bekannten Snapshot statt den Mess-Daemon zu blockieren.
+        if self._state_lock.acquire(timeout=2.0):
+            try:
+                self._last_snapshot = self.state.to_dict()
+            finally:
+                self._state_lock.release()
+        return self._last_snapshot
 
     def recent_levels(self, seconds: float = 120.0, buckets: int = 600) -> list[dict]:
         """Pegel für den Dashboard-Graphen — in ~600 Zeit-Buckets aggregiert.
@@ -470,6 +477,10 @@ class SessionAggregator:
         return [{"ts": r[0], "db": r[1]} for r in rows]
 
     def recent_events(self, limit: int = 20) -> list[dict]:
-        """Letzte Audio-Ereignisse für das Dashboard."""
-        with self._events_lock:
-            return list(self._recent_events)[:limit]
+        """Letzte Audio-Ereignisse für das Dashboard (blockierfrei)."""
+        if self._events_lock.acquire(timeout=2.0):
+            try:
+                return list(self._recent_events)[:limit]
+            finally:
+                self._events_lock.release()
+        return []

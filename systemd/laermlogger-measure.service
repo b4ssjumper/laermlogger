@@ -2,13 +2,16 @@
 Description=Laermlogger Mess-Daemon (PeakTech 8005 + Audio) — stabil, selten neu starten
 After=sound.target
 Wants=sound.target
+# Bei häufigem Absturz nicht dauerhaft aufgeben (Selbstheilung ist gewollt)
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=admin
 WorkingDirectory=/home/admin/laermlogger
 ExecStart=/home/admin/laermlogger/.venv/bin/laermlogger measure
-Restart=on-failure
+# Watchdog beendet sich bei Hänger selbst (os._exit) -> immer neu starten
+Restart=always
 RestartSec=5
 
 [Install]

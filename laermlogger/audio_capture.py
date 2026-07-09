@@ -98,14 +98,19 @@ class AudioCapture:
         self.peak = 0.0
 
     def _callback(self, indata, frames, time_info, status):
+        # Läuft im PortAudio-Thread. Ein Overflow ist nur eine Warnung; eine
+        # Exception darf den Stream niemals abwürgen -> alles abfangen.
         if status:
             log.warning("Audio-Status: %s", status)
-        mono = indata[:, 0] if indata.ndim > 1 else indata
-        peak = float(np.max(np.abs(mono)))
-        self.peak = max(self.peak, peak)
-        if peak >= 0.99:
-            self.clipped_blocks += 1
-        self.ring.push(mono.astype(np.float32))
+        try:
+            mono = indata[:, 0] if indata.ndim > 1 else indata
+            peak = float(np.max(np.abs(mono)))
+            self.peak = max(self.peak, peak)
+            if peak >= 0.99:
+                self.clipped_blocks += 1
+            self.ring.push(mono.astype(np.float32))
+        except Exception as exc:   # noqa: BLE001 — Audio-Thread niemals sterben lassen
+            log.error("Audio-Callback-Fehler (ignoriert): %s", exc)
 
     def start(self) -> None:
         device = find_input_device(self.cfg.device)
@@ -115,6 +120,7 @@ class AudioCapture:
             channels=self.cfg.channels,
             blocksize=self.cfg.blocksize,
             dtype="float32",
+            latency="high",     # größerer Puffer -> deutlich weniger Input-Overflows
             callback=self._callback,
         )
         self._stream.start()

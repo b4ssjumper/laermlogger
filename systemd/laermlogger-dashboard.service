@@ -2,13 +2,14 @@
 Description=Laermlogger Dashboard (Weboberflaeche) — frei neustartbar, unterbricht Messung nicht
 After=network-online.target laermlogger-measure.service
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
 User=admin
 WorkingDirectory=/home/admin/laermlogger
 ExecStart=/home/admin/laermlogger/.venv/bin/laermlogger dashboard
-Restart=on-failure
+Restart=always
 RestartSec=5
 
 [Install]

@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,8 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
-STATUS_STALE_S = 5.0   # ab wann das Dashboard einen Status als veraltet wertet
+STATUS_STALE_S = 5.0    # ab wann das Dashboard einen Status als veraltet wertet
+WATCHDOG_TIMEOUT = 30.0  # hängt die Hauptschleife länger -> Prozess neu starten lassen
 
 
 class MeasureDaemon:
@@ -38,6 +40,7 @@ class MeasureDaemon:
         self.last_seq = -1
         self.session_day = None        # Kalendertag der aktiven Session (für Rollover)
         self.model_mtime = self._model_mtime()
+        self._last_tick = time.time()  # Heartbeat für den Watchdog
 
     # -- Datei-Helfer ----------------------------------------------------
     def _read_control(self) -> dict | None:
@@ -123,16 +126,32 @@ class MeasureDaemon:
                 self.agg.reload_custom_model()
                 log.info("Eigenes Sound-Modell neu geladen (Datei geändert)")
 
+    def _watchdog(self) -> None:
+        """Beendet den Prozess, wenn die Hauptschleife hängt — systemd startet neu."""
+        while True:
+            time.sleep(10.0)
+            if time.time() - self._last_tick > WATCHDOG_TIMEOUT:
+                log.error("Hauptschleife hängt >%.0fs — beende Prozess zum Neustart",
+                          WATCHDOG_TIMEOUT)
+                os._exit(1)   # harter Exit -> systemd Restart=always fängt es ab
+
     def run(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         log.info("Mess-Daemon gestartet — wartet auf Kommandos (%s)", self.control_path)
+        self._last_tick = time.time()
+        threading.Thread(target=self._watchdog, name="watchdog", daemon=True).start()
         self._write_status()
         try:
             while True:
-                self._poll_control()
-                self._maybe_rollover()
-                self._maybe_reload_model()
-                self._write_status()
+                self._last_tick = time.time()
+                # jeder Schritt einzeln abgesichert -> ein Fehler killt die Schleife nie
+                for step in (self._poll_control, self._maybe_rollover,
+                             self._maybe_reload_model, self._write_status):
+                    try:
+                        step()
+                    except Exception as exc:
+                        log.error("Daemon-Schritt %s fehlgeschlagen: %s",
+                                  step.__name__, exc)
                 time.sleep(1.0)
         except KeyboardInterrupt:
             log.info("Daemon beendet — stoppe Session")
