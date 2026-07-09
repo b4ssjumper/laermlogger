@@ -273,13 +273,17 @@ async def combine_levels(from_: str = Query(None, alias="from"), to: str = None,
 
 
 @app.get("/api/combine/events")
-async def combine_events(from_: str = Query(None, alias="from"), to: str = None):
-    """Alle Ereignis-Clips im Zeitraum, je Clip mit Session + Nutzer-Label (zum Labeln)."""
+async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
+                         limit: int = 300):
+    """Lauteste Ereignis-Clips im Zeitraum (nach Pegel), je Clip mit Session +
+    Nutzer-Label (zum Labeln). `limit` begrenzt die Anzahl für die Anzeige."""
     from .. import custom_sounds
     from ..report.protocol import _combined_audio_events
 
     paths = _sessions_in_range(from_, to)
     events = await asyncio.to_thread(_combined_audio_events, paths)
+    total = len(events)
+    events = events[:limit]     # bereits nach Pegel absteigend sortiert
     label_cache: dict = {}
     out = []
     for e in events:

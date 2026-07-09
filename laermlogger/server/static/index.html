@@ -14,7 +14,7 @@
   body {
     background: var(--bg); color: var(--text);
     font: 15px/1.5 system-ui, -apple-system, sans-serif;
-    padding: 1.2rem; max-width: 1100px; margin: 0 auto;
+    padding: 1.2rem 1.6rem; max-width: 1700px; margin: 0 auto;
   }
   h1 { font-size: 1.25rem; margin-bottom: 1rem; display: flex; align-items: center; gap: .6rem; }
   h1 .dot { width: .7rem; height: .7rem; border-radius: 50%; background: var(--muted); }
@@ -30,6 +30,7 @@
   canvas { width: 100%; height: 320px; display: block; }
   .range button { background: var(--panel); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .3rem .7rem; font-size: .8rem; font-weight: 500; cursor: pointer; }
   .range button.active { background: var(--accent); color: #06232f; border-color: var(--accent); }
+  .pdflink { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 8px; padding: .5rem 1rem; font-weight: 600; font-size: .9rem; }
   .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
   .opt { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
   .opt input[type=number], .opt input[type=date] { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: .35rem .5rem; }
@@ -121,7 +122,7 @@
 
 <div class="card wide" style="margin-bottom:1rem">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:.5rem;margin-bottom:.4rem">
-    <span class="label" id="chartLabel">Pegelverlauf (letzte 2 Minuten)</span>
+    <span class="label" id="chartLabel">Pegelverlauf</span>
     <span id="rangeToggle" class="range">
       <button data-sec="120">Live</button>
       <button data-sec="300">5 min</button>
@@ -130,7 +131,15 @@
       <button data-sec="604800">1 Woche</button>
     </span>
   </div>
-  <canvas id="chart" width="1060" height="320"></canvas>
+  <div class="row" style="margin-bottom:.6rem">
+    <span class="label" style="margin:0">Filter Zeitraum:</span>
+    <label class="opt">von <input id="fFrom" type="date"></label>
+    <label class="opt">bis <input id="fTo" type="date"></label>
+    <button id="fApply">Filtern</button>
+    <button id="fClear" class="stop" hidden>× Filter aus</button>
+    <a id="fPdf" href="#" target="_blank" class="pdflink" hidden>📄 PDF für Zeitraum</a>
+  </div>
+  <canvas id="chart" width="1400" height="340"></canvas>
 </div>
 
 <div class="card wide">
@@ -146,16 +155,6 @@
   </div>
   <datalist id="labelList"></datalist>
   <div id="eventClips" class="muted">Noch keine Ereignisse.</div>
-</div>
-
-<div class="card wide" style="margin-top:1rem">
-  <div class="label" style="margin-bottom:.5rem">Bericht für einen Zeitraum</div>
-  <div class="row" style="margin-bottom:0">
-    <label class="opt">von <input id="combFrom" type="date"></label>
-    <label class="opt">bis <input id="combTo" type="date"></label>
-    <button id="btnCombine">📊 Zeitraum öffnen</button>
-    <span class="muted" style="font-size:.82rem">Alle Daten im Zeitraum — Clips anhören &amp; labeln, dann PDF erzeugen.</span>
-  </div>
 </div>
 
 <div class="card wide" style="margin-top:1rem">
@@ -227,6 +226,7 @@ function eventRowHTML(e, session) {
 
 // Anfügen statt Neuzeichnen: laufende Audio-Player werden nie zerstört.
 function renderEvents(events, session) {
+  if (filterActive()) return;   // Zeitraum-Filter besitzt das Clip-Panel
   curSession = session;
   const el = $("eventClips");
   if (session !== eventsSessionKey) {   // neue Session -> Liste zurücksetzen
@@ -354,17 +354,23 @@ function setBadge(id, name, ok) {
 }
 
 let chartRange = 86400;   // Standard: letzter Tag (zeigt sofort Daten)
+let filterFrom = null, filterTo = null;   // absoluter Zeitraum-Filter (überschreibt chartRange)
 const RANGE_LABEL = {120: "Live — letzte 2 Minuten", 300: "letzte 5 Minuten",
                      3600: "letzte Stunde", 86400: "letzter Tag", 604800: "letzte Woche"};
+const filterActive = () => filterFrom || filterTo;
 
 async function refreshChart() {
   try {
-    const sec = chartRange || 999999999;
-    // /api/timeline: durchgehend über ALLE Messungen im Fenster
-    const r = await fetch(`/api/timeline?seconds=${sec}`);
+    let r;
+    if (filterActive()) {
+      r = await fetch(`/api/combine/levels?from=${filterFrom || ""}&to=${filterTo || ""}`);
+      $("chartLabel").textContent = `Pegelverlauf — Zeitraum ${filterFrom || "Beginn"} bis ${filterTo || "Ende"}`;
+    } else {
+      r = await fetch(`/api/timeline?seconds=${chartRange || 999999999}`);
+      $("chartLabel").textContent = "Pegelverlauf — alle Messungen (" + (RANGE_LABEL[chartRange] || "") + ")";
+    }
     levels = await r.json();
   } catch (e) { return; }
-  $("chartLabel").textContent = "Pegelverlauf — alle Messungen (" + (RANGE_LABEL[chartRange] || "") + ")";
   drawChart($("chart"), levels);
 }
 
@@ -454,57 +460,53 @@ async function openReview(name) {
 
 function closeReview() { $("review").hidden = true; }
 
-// ---- Zeitraum-Bericht: alle Daten im Zeitraum, Clips labeln, dann PDF -----
-async function openCombined(from, to) {
-  const rv = $("review");
-  rv.hidden = false;
-  rv.scrollIntoView({behavior: "smooth"});
-  const q = `from=${from || ""}&to=${to || ""}`;
-  const label = (from || "Beginn") + " bis " + (to || "Ende");
-  $("reviewTitle").textContent = "Zeitraum: " + label;
-  $("reviewBody").innerHTML = '<span class="muted">lädt…</span>';
-  $("reviewClips").innerHTML = "";
-  const [sum, lv] = await Promise.all([
-    fetch(`/api/combine/summary?${q}`).then(r => r.ok ? r.json() : null).catch(() => null),
-    fetch(`/api/combine/levels?${q}`).then(r => r.json()).catch(() => [])
-  ]);
-  $("reviewActions").innerHTML =
-      `<a href="/api/combine/report?${q}" target="_blank">📄 PDF erzeugen</a>`
-    + `<a class="close" href="#" onclick="closeReview();return false">✕ schließen</a>`;
-  if (!sum || !sum.n_samples) {
-    $("reviewBody").innerHTML = '<p class="muted">Keine Messdaten in diesem Zeitraum.</p>';
-    return;
-  }
-  const p = sum.percentiles || {};
-  const rate = (r, lbl) => r ? `<div class="rv-row"><b>${lbl}</b> Lr ${r.rating_level_db} dB / Richtwert ${r.limit_db} dB — `
-      + (r.exceeds_limit ? `<span style="color:var(--bad)">überschritten</span>` : `<span style="color:var(--ok)">eingehalten</span>`)
-      + (r.note ? ` <span class="muted">(${r.note})</span>` : "") + `</div>` : "";
-  $("reviewBody").innerHTML =
-      `<div class="rv-grid">`
-    + `<div><span class="label">LAeq</span><div class="rv-val">${sum.laeq_db ?? "–"} dB</div></div>`
-    + `<div><span class="label">LAFmax</span><div class="rv-val">${sum.lafmax_db ?? "–"} dB</div></div>`
-    + `<div><span class="label">LAFmin</span><div class="rv-val">${sum.lafmin_db ?? "–"} dB</div></div>`
-    + `<div><span class="label">Messungen</span><div class="rv-val">${sum.n_sessions ?? "–"}</div></div>`
-    + `</div>`
-    + `<div class="perc" style="margin:.5rem 0">` + Object.entries(p).map(([k,v]) => `<span>${k}: <b>${v}</b> dB</span>`).join("") + `</div>`
-    + rate(sum.day, "Tag") + rate(sum.night, "Nacht")
-    + `<div class="muted" style="margin:.3rem 0">${sum.n_samples} Werte · ${sum.n_events} Ereignisse aus ${sum.n_sessions} Messung(en)</div>`
-    + (sum.sources && sum.sources.length ? `<div class="muted">Quellen: ` + sum.sources.map(s => `${s.category} ${(s.share*100).toFixed(0)}%`).join(" · ") + `</div>` : "")
-    + `<canvas id="reviewChart" width="1060" height="300" style="margin-top:.6rem"></canvas>`;
-  drawChart($("reviewChart"), lv);
+// ---- Zeitraum-Filter: filtert Graph + Clips-Panel, PDF für den Zeitraum ----
+async function applyFilter() {
+  filterFrom = $("fFrom").value || null;
+  filterTo = $("fTo").value || null;
+  if (!filterActive()) { clearFilter(); return; }
+  const q = `from=${filterFrom || ""}&to=${filterTo || ""}`;
+  document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
+  $("fClear").hidden = false;
+  $("fPdf").hidden = false;
+  $("fPdf").href = `/api/combine/report?${q}`;
+  refreshChart();
+  loadRangeClips(q);
+}
 
-  const evs = await fetch(`/api/combine/events?${q}`).then(r => r.json()).catch(() => []);
-  $("reviewClips").innerHTML = evs.length
-    ? `<div class="label" style="margin:.4rem 0">Clips im Zeitraum (${evs.length}) — anhören &amp; benennen, dann oben PDF erzeugen</div>` + clipRowsHTML(evs, {}, null)
+function clearFilter() {
+  filterFrom = filterTo = null;
+  $("fFrom").value = ""; $("fTo").value = "";
+  $("fClear").hidden = true; $("fPdf").hidden = true;
+  chartRange = 86400;
+  document.querySelectorAll("#rangeToggle button").forEach(x =>
+    x.classList.toggle("active", parseInt(x.dataset.sec) === 86400));
+  renderedClips = new Set(); eventsSessionKey = null; $("eventClips").innerHTML = "";
+  refreshChart();
+}
+
+async function loadRangeClips(q) {
+  const el = $("eventClips");
+  el.innerHTML = '<span class="muted">lädt Clips…</span>';
+  const evs = await fetch(`/api/combine/events?${q}&limit=300`).then(r => r.json()).catch(() => []);
+  el.innerHTML = evs.length
+    ? `<div class="muted" style="margin-bottom:.4rem">Lauteste Clips im Zeitraum (${evs.length}) — anhören &amp; benennen, dann oben „PDF für Zeitraum".</div>`
+      + clipRowsHTML(evs, {}, null)
     : '<div class="muted">Keine Clips im Zeitraum.</div>';
 }
 
-$("btnCombine").onclick = () => {
-  openCombined($("combFrom").value, $("combTo").value);
-};
+$("fApply").onclick = applyFilter;
+$("fClear").onclick = clearFilter;
 
 document.querySelectorAll("#rangeToggle button").forEach(b => {
   b.onclick = () => {
+    // relativer Bereich -> absoluten Filter aufheben
+    if (filterActive()) {
+      filterFrom = filterTo = null;
+      $("fFrom").value = ""; $("fTo").value = "";
+      $("fClear").hidden = true; $("fPdf").hidden = true;
+      renderedClips = new Set(); eventsSessionKey = null; $("eventClips").innerHTML = "";
+    }
     chartRange = parseInt(b.dataset.sec);
     document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
