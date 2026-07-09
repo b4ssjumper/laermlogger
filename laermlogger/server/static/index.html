@@ -387,9 +387,18 @@ function setBadge(id, name, ok) {
 
 let chartRange = 86400;   // Standard: letzter Tag (zeigt sofort Daten)
 let filterFrom = null, filterTo = null;   // absoluter Zeitraum-Filter (überschreibt chartRange)
+let viewStart = null, viewEnd = null;      // Zoom/Pan-Fenster (epoch s), null = kein Zoom
+let mainT0 = 0, mainT1 = 0, mainPad = 34, mainW = 1000;  // Geometrie des Hauptgraphen
 const RANGE_LABEL = {120: "Live — letzte 2 Minuten", 300: "letzte 5 Minuten",
                      3600: "letzte Stunde", 86400: "letzter Tag", 604800: "letzte Woche"};
 const filterActive = () => filterFrom || filterTo;
+
+function fmtSpan(s) {
+  if (s < 120) return Math.round(s) + " s";
+  if (s < 7200) return Math.round(s / 60) + " min";
+  if (s < 2 * 86400) return (s / 3600).toFixed(1) + " h";
+  return (s / 86400).toFixed(1) + " Tage";
+}
 
 async function refreshChart() {
   try {
@@ -397,9 +406,12 @@ async function refreshChart() {
     if (filterActive()) {
       r = await fetch(`/api/combine/levels?from=${filterFrom || ""}&to=${filterTo || ""}`);
       $("chartLabel").textContent = `Pegelverlauf — Zeitraum ${filterFrom || "Beginn"} bis ${filterTo || "Ende"}`;
+    } else if (viewStart != null) {
+      r = await fetch(`/api/timeline?from_ts=${viewStart}&to_ts=${viewEnd}`);
+      $("chartLabel").textContent = `Pegelverlauf — Zoom (${fmtSpan(viewEnd - viewStart)}) · Zeitbereich oben = zurück`;
     } else {
       r = await fetch(`/api/timeline?seconds=${chartRange || 999999999}`);
-      $("chartLabel").textContent = "Pegelverlauf — alle Messungen (" + (RANGE_LABEL[chartRange] || "") + ")";
+      $("chartLabel").textContent = "Pegelverlauf — alle Messungen (" + (RANGE_LABEL[chartRange] || "") + ") · Rad = Zoom, Ziehen = Verschieben";
     }
     levels = await r.json();
   } catch (e) { return; }
@@ -415,6 +427,7 @@ function drawChart(c, data) {
   const max = Math.ceil(Math.max(...dbs) / 10) * 10;
   const t0 = data[0].ts, t1 = data[data.length - 1].ts;
   const pad = 34, w = c.width - pad - 8, h = c.height - 34;
+  if (c.id === "chart") { mainT0 = t0; mainT1 = t1; mainPad = pad; mainW = w; }
   const x = i => pad + (i / (data.length - 1)) * w;
   const y = db => 8 + (1 - (db - min) / Math.max(max - min, 1)) * (h - 8);
 
@@ -496,10 +509,12 @@ function closeReview() { $("review").hidden = true; }
 let clipQ = "";            // aktueller Zeitraum-Filter ("" = alle Daten)
 let clipOffset = 0;
 let showArchive = false;
+let clipSort = "loudest";  // "loudest" | "newest"
 
 async function applyFilter() {
   filterFrom = $("fFrom").value || null;
   filterTo = $("fTo").value || null;
+  viewStart = viewEnd = null;   // Zoom zurücksetzen
   document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
   const q = filterActive() ? `from=${filterFrom || ""}&to=${filterTo || ""}` : "";
   $("fPdf").hidden = !filterActive();
@@ -511,6 +526,7 @@ async function applyFilter() {
 
 function clearFilter() {
   filterFrom = filterTo = null;
+  viewStart = viewEnd = null;   // Zoom zurücksetzen
   $("fFrom").value = ""; $("fTo").value = "";
   $("fPdf").hidden = true;
   chartRange = 86400;
@@ -528,14 +544,18 @@ async function loadClips(reset) {
     el.innerHTML = `<div id="clipHead" class="row" style="margin:0 0 .5rem"></div>`
       + `<div id="clipRows"></div><div id="clipFoot" style="margin-top:.5rem"></div>`;
   }
-  const d = await fetch(`/api/combine/events?${clipQ}&offset=${clipOffset}&limit=25&include_done=${showArchive}`)
+  const d = await fetch(`/api/combine/events?${clipQ}&offset=${clipOffset}&limit=25&include_done=${showArchive}&sort=${clipSort}`)
     .then(r => r.json()).catch(() => ({clips: [], total: 0, remaining: 0}));
   $("clipRows").insertAdjacentHTML("beforeend", clipRowsHTML(d.clips || [], {}, null));
   clipOffset += (d.clips || []).length;
   const scope = clipQ ? "im Zeitraum" : "gesamt";
   $("clipHead").innerHTML =
       `<span class="muted">${showArchive ? "Archiv (erledigt)" : "Offen"} ${scope}: <b>${d.total}</b> Clips</span>`
+    + `<span class="opt">Sortieren: <select id="sortSel">`
+    +   `<option value="loudest"${clipSort === "loudest" ? " selected" : ""}>lauteste zuerst</option>`
+    +   `<option value="newest"${clipSort === "newest" ? " selected" : ""}>neueste zuerst</option></select></span>`
     + `<label class="opt"><input type="checkbox" id="archToggle" ${showArchive ? "checked" : ""}> Archiv anzeigen</label>`;
+  $("sortSel").onchange = e => { clipSort = e.target.value; loadClips(true); };
   $("archToggle").onchange = e => { showArchive = e.target.checked; loadClips(true); };
   $("clipFoot").innerHTML = d.remaining > 0
     ? `<button id="moreBtn">Mehr laden (${d.remaining} übrig)</button>`
@@ -548,19 +568,54 @@ $("fClear").onclick = clearFilter;
 
 document.querySelectorAll("#rangeToggle button").forEach(b => {
   b.onclick = () => {
-    // relativer Bereich -> absoluten Filter aufheben
-    if (filterActive()) {
-      filterFrom = filterTo = null;
-      $("fFrom").value = ""; $("fTo").value = "";
-      $("fClear").hidden = true; $("fPdf").hidden = true;
-      renderedClips = new Set(); eventsSessionKey = null; $("eventClips").innerHTML = "";
-    }
+    viewStart = viewEnd = null;   // Zoom zurücksetzen
     chartRange = parseInt(b.dataset.sec);
     document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
     refreshChart();
   };
 });
+
+// ---- Zoom (Mausrad) + Pan (Ziehen) im Hauptgraphen ----
+(function () {
+  const c = $("chart");
+  let refreshT = null;
+  const schedule = () => { clearTimeout(refreshT); refreshT = setTimeout(refreshChart, 140); };
+  const winBounds = () => [viewStart != null ? viewStart : mainT0,
+                           viewEnd != null ? viewEnd : mainT1];
+  c.style.cursor = "grab";
+  c.addEventListener("wheel", e => {
+    if (filterActive() || levels.length < 2) return;
+    e.preventDefault();
+    const rect = c.getBoundingClientRect();
+    const px = (e.clientX - rect.left) / rect.width * c.width;
+    const frac = Math.max(0, Math.min(1, (px - mainPad) / mainW));
+    const [t0, t1] = winBounds();
+    const cur = t0 + frac * (t1 - t0);
+    let span = (t1 - t0) * (e.deltaY < 0 ? 0.75 : 1.33);
+    span = Math.max(15, Math.min(span, 8 * 86400));
+    viewStart = cur - frac * span;
+    viewEnd = cur + (1 - frac) * span;
+    schedule();
+  }, {passive: false});
+  let drag = null;
+  c.addEventListener("mousedown", e => {
+    if (filterActive() || levels.length < 2) return;
+    const [t0, t1] = winBounds();
+    drag = {x: e.clientX, t0, t1};
+    c.style.cursor = "grabbing";
+  });
+  window.addEventListener("mousemove", e => {
+    if (!drag) return;
+    const rect = c.getBoundingClientRect();
+    const dpx = (e.clientX - drag.x) / rect.width * c.width;
+    const dt = -(dpx / mainW) * (drag.t1 - drag.t0);
+    viewStart = drag.t0 + dt;
+    viewEnd = drag.t1 + dt;
+    schedule();
+  });
+  window.addEventListener("mouseup", () => { if (drag) { drag = null; c.style.cursor = "grab"; } });
+})();
 
 $("btnStart").onclick = async () => {
   const r = await fetch("/api/session/start", {
@@ -640,6 +695,7 @@ loadClips(true);        // Clips sofort zeigen (alle Daten)
 let chartTick = 0;
 setInterval(() => {                       // Live/5min alle 2 s, Tag/Woche alle 30 s
   chartTick++;
+  if (viewStart != null || filterActive()) return;   // Zoom/Filter nicht überschreiben
   if (chartRange < 86400 || chartTick % 15 === 0) refreshChart();
 }, 2000);
 setInterval(loadSessions, 15000);

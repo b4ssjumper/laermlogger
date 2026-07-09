@@ -154,10 +154,11 @@ async def levels(seconds: float = 120.0):
     return await asyncio.to_thread(session_levels, db, 600, seconds)
 
 
-def _sessions_overlapping(cutoff: float) -> list[Path]:
-    """Session-Dateien, deren Zeitraum das Fenster [cutoff, jetzt] berührt."""
+def _sessions_overlapping(lo: float, hi: float | None = None) -> list[Path]:
+    """Session-Dateien, deren Zeitraum das Fenster [lo, hi] berührt."""
     import sqlite3
 
+    hi = hi if hi is not None else time.time()
     out = []
     for f in Path(_cfg.db_dir).glob("session_*.sqlite"):
         try:
@@ -169,19 +170,24 @@ def _sessions_overlapping(cutoff: float) -> list[Path]:
             continue
         if not row or not row[0]:
             continue
-        end = row[1] or time.time()   # laufende Messung: bis jetzt
-        if end >= cutoff:
+        start, end = row[0], (row[1] or time.time())
+        if end >= lo and start <= hi:
             out.append(f)
     return sorted(out)
 
 
 @app.get("/api/timeline")
-async def timeline(seconds: float = 120.0):
-    """Durchgehender Pegelverlauf über ALLE Messungen im gewählten Fenster."""
+async def timeline(seconds: float = 120.0, from_ts: float = None, to_ts: float = None):
+    """Durchgehender Pegelverlauf über ALLE Messungen. Absolutes Fenster über
+    from_ts/to_ts (Zoom/Pan), sonst die letzten `seconds`."""
     from ..report.protocol import session_levels
 
-    cutoff = time.time() - seconds
-    paths = _sessions_overlapping(cutoff)
+    if from_ts is not None and to_ts is not None:
+        lo, hi = from_ts, to_ts
+    else:
+        hi = time.time()
+        lo = hi - seconds
+    paths = _sessions_overlapping(lo, hi)
     if not paths:
         return []
 
@@ -189,7 +195,7 @@ async def timeline(seconds: float = 120.0):
         per = max(900 // len(paths), 200)
         pts: list[dict] = []
         for p in paths:
-            pts.extend(session_levels(p, per, seconds))
+            pts.extend(session_levels(p, per, lo=lo, hi=hi))
         pts.sort(key=lambda x: x["ts"])
         return pts
 
@@ -309,12 +315,36 @@ async def combine_levels(from_: str = Query(None, alias="from"), to: str = None,
     return await asyncio.to_thread(combined_levels, paths, buckets)
 
 
+def _add_scores(clips: list[dict]) -> list[dict]:
+    """Konfidenz-Score der angezeigten Clips mit dem aktuellen Modell nachrechnen
+    (für Clips ohne gespeicherten Score, z.B. vor Einführung der Score-Spalte)."""
+    from .. import custom_sounds
+
+    model = custom_sounds.CustomModel.load(_cfg)
+    if not model:
+        return clips
+    clf = _get_classifier()
+    for c in clips:
+        if c.get("custom_score") or c.get("user_label"):
+            continue
+        try:
+            feat = custom_sounds.clip_feature(_cfg, clf, c["session"], c["mp3"])
+            if feat is None:
+                continue
+            lbl, sim = model.predict(feat)
+            c["custom_label"] = lbl or c.get("custom_label", "")
+            c["custom_score"] = round(float(sim), 3)
+        except Exception:
+            pass
+    return clips
+
+
 @app.get("/api/combine/events")
 async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
-                         offset: int = 0, limit: int = 25, include_done: bool = False):
-    """Ereignis-Clips im Zeitraum (nach Pegel absteigend), zum Labeln.
-    Erledigte Clips (im Archiv) werden standardmäßig ausgeblendet.
-    offset/limit für Lazy Loading; gibt {clips, total, remaining} zurück."""
+                         offset: int = 0, limit: int = 25, include_done: bool = False,
+                         sort: str = "loudest"):
+    """Ereignis-Clips im Zeitraum, zum Labeln. sort: 'loudest' | 'newest'.
+    Erledigte Clips (Archiv) standardmäßig ausgeblendet. offset/limit = Lazy Loading."""
     from .. import custom_sounds
     from ..report.protocol import _combined_audio_events
 
@@ -338,7 +368,11 @@ async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
                          "session": e["session"],
                          "user_label": label_cache[s].get(e["mp3"], ""),
                          "done": is_done})
+    if sort == "newest":
+        filtered.sort(key=lambda c: c["ts"], reverse=True)
+    # (sonst: bleibt nach Pegel absteigend aus _combined_audio_events)
     page = filtered[offset:offset + limit]
+    page = await asyncio.to_thread(_add_scores, page)
     return {"clips": page, "total": len(filtered),
             "remaining": max(0, len(filtered) - offset - len(page))}
 

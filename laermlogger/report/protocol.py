@@ -236,15 +236,17 @@ def _exceedance_events(timestamps: np.ndarray, levels: np.ndarray,
 
 
 def session_levels(db_path: Path, buckets: int = 800,
-                   seconds: float | None = None) -> list[dict]:
+                   seconds: float | None = None,
+                   lo: float | None = None, hi: float | None = None) -> list[dict]:
     """Pegelverlauf einer Session, in ~buckets Zeit-Buckets aggregiert (MAX je
-    Bucket). Ohne `seconds`: ganze Session (Review). Mit `seconds`: nur die
-    letzten N Sekunden (Live-Ansicht der aktiven Messung)."""
+    Bucket). lo/hi = absolutes Zeitfenster (Zoom); sonst `seconds` relativ zu
+    jetzt; sonst ganze Session."""
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2.0)
     try:
-        if seconds is not None:
-            cutoff = time.time() - seconds
-            where, params = "WHERE ts >= ?", [cutoff]
+        if lo is not None and hi is not None:
+            where, params = "WHERE ts >= ? AND ts <= ?", [lo, hi]
+        elif seconds is not None:
+            where, params = "WHERE ts >= ?", [time.time() - seconds]
         else:
             where, params = "", []
         row = conn.execute(
