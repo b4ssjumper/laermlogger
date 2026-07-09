@@ -336,15 +336,15 @@ def _event_source_shares(db_path: Path, cfg: Config, events: list[dict]) -> list
             for c, n in counts.most_common()]
 
 
-def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Path:
-    """PDF-Lärmmessprotokoll für eine Session erzeugen."""
+def _render_report(data: dict, audio_events: list[dict], shares: list[dict],
+                   shares_from_events: bool, cfg: Config, out_path: Path) -> Path:
+    """Gemeinsamer Render-Kern für Einzel- und Kombi-Report."""
     from jinja2 import Template
     from weasyprint import HTML
 
-    data = _load_session(db_path)
     spl = data["spl"]
     if not spl:
-        raise ValueError("Session enthält keine Pegel-Samples")
+        raise ValueError("keine Pegel-Samples")
 
     timestamps = np.array([r[0] for r in spl])
     levels = np.array([r[1] for r in spl])
@@ -353,23 +353,10 @@ def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Pa
     audio_fallback_used = "Audio-Schätzung" in ranges
 
     impulse_detected, tonal_detected = _detect_surcharges(data["classifications"])
-
     metrics = evaluate_session(timestamps, levels, cfg.rating,
                                impulse_detected, tonal_detected)
+    events = _exceedance_events(timestamps, levels, cfg.rating.limit_day_db)
 
-    # Ereignisliste: Überschreitungen des jeweils gültigen Richtwerts
-    day_limit = cfg.rating.limit_day_db
-    events = _exceedance_events(timestamps, levels, day_limit)
-
-    # Aufgezeichnete Audio-Clips laden
-    audio_events = _load_audio_events(db_path)
-    # Lärmquellen bevorzugt aus den (ggf. gelabelten) Ereignis-Clips,
-    # sonst aus der Sekunden-Klassifikation
-    event_shares = _event_source_shares(db_path, cfg, audio_events)
-    shares = event_shares if event_shares else _category_shares(data["classifications"])
-    shares_from_events = bool(event_shares)
-
-    # Große Visualisierungen nur bei ausreichend langem Zeitraum (> 1 h)
     span_s = float(timestamps[-1] - timestamps[0])
     heatmap_b64 = daily_strips_b64 = None
     if span_s > 3600:
@@ -403,11 +390,120 @@ def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Pa
         created=datetime.now(),
         version="0.1.0",
     )
-
-    out_path = out_path or db_path.with_suffix(".pdf")
     HTML(string=html).write_pdf(out_path)
     log.info("Protokoll erzeugt: %s", out_path)
     return out_path
+
+
+def build_report(db_path: Path, cfg: Config, out_path: Path | None = None) -> Path:
+    """PDF-Lärmmessprotokoll für eine einzelne Session erzeugen."""
+    data = _load_session(db_path)
+    if not data["spl"]:
+        raise ValueError("Session enthält keine Pegel-Samples")
+    audio_events = _load_audio_events(db_path)
+    event_shares = _event_source_shares(db_path, cfg, audio_events)
+    shares = event_shares if event_shares else _category_shares(data["classifications"])
+    return _render_report(data, audio_events, shares, bool(event_shares), cfg,
+                          out_path or db_path.with_suffix(".pdf"))
+
+
+# -- Mehrere Messungen zusammenführen ---------------------------------
+def _load_combined(db_paths: list[Path]) -> dict:
+    """Mehrere Sessions zu einer Zeitreihe zusammenführen (zeitlich sortiert)."""
+    metas, spl, cls = [], [], []
+    for p in db_paths:
+        d = _load_session(p)
+        metas.append(d["meta"])
+        spl.extend(d["spl"])
+        cls.extend(d["classifications"])
+    spl.sort(key=lambda r: r[0])
+    cls.sort(key=lambda r: r[0])
+    starts = [m["started_at"] for m in metas if m["started_at"]]
+    ends = [m["ended_at"] for m in metas if m["ended_at"]]
+    locs = sorted({m["location"] for m in metas if m["location"]})
+    meta = {
+        "started_at": min(starts) if starts else (spl[0][0] if spl else None),
+        "ended_at": max(ends) if ends else (spl[-1][0] if spl else None),
+        "device": metas[0]["device"] if metas else "",
+        "location": locs[0] if len(locs) == 1 else ", ".join(locs),
+        "operator": metas[0]["operator"] if metas else "",
+        "notes": f"{len(db_paths)} Messungen zusammengeführt",
+    }
+    return {"meta": meta, "spl": spl, "classifications": cls}
+
+
+def _combined_audio_events(db_paths: list[Path]) -> list[dict]:
+    events = []
+    for p in db_paths:
+        for e in _load_audio_events(p):
+            e = dict(e)
+            e["session"] = p.stem
+            events.append(e)
+    events.sort(key=lambda e: e["peak_db"], reverse=True)
+    return events
+
+
+def _combined_event_shares(cfg: Config, events: list[dict]) -> list[dict]:
+    from .. import custom_sounds
+
+    if not events:
+        return []
+    labels_cache: dict = {}
+    counts: Counter = Counter()
+    for e in events:
+        s = e.get("session")
+        if s not in labels_cache:
+            labels_cache[s] = custom_sounds.labels_for_session(cfg, s)
+        best = (labels_cache[s].get(e["mp3"]) or e.get("custom_label")
+                or e.get("category") or "Sonstiges")
+        counts[best] += 1
+    total = sum(counts.values()) or 1
+    return [{"category": c, "share": n / total, "windows": n}
+            for c, n in counts.most_common()]
+
+
+def build_combined_report(db_paths: list[Path], cfg: Config, out_path: Path) -> Path:
+    """PDF-Protokoll über mehrere zusammengeführte Messungen."""
+    data = _load_combined(db_paths)
+    if not data["spl"]:
+        raise ValueError("keine Pegel-Samples im Zeitraum")
+    events = _combined_audio_events(db_paths)
+    event_shares = _combined_event_shares(cfg, events)
+    shares = event_shares if event_shares else _category_shares(data["classifications"])
+    return _render_report(data, events, shares, bool(event_shares), cfg, out_path)
+
+
+def combined_summary(db_paths: list[Path], cfg: Config) -> dict:
+    data = _load_combined(db_paths)
+    if not data["spl"]:
+        return {"meta": data["meta"], "n_samples": 0}
+    ts = np.array([r[0] for r in data["spl"]])
+    lv = np.array([r[1] for r in data["spl"]])
+    imp, ton = _detect_surcharges(data["classifications"])
+    m = evaluate_session(ts, lv, cfg.rating, imp, ton)
+    events = _combined_audio_events(db_paths)
+    return {
+        "meta": data["meta"],
+        "started": data["meta"]["started_at"], "ended": data["meta"]["ended_at"],
+        "duration_min": (ts[-1] - ts[0]) / 60,
+        "n_samples": len(lv), "n_events": len(events), "n_sessions": len(db_paths),
+        "laeq_db": round(m.overall.laeq_db, 1),
+        "lafmax_db": round(m.overall.lafmax_db, 1),
+        "lafmin_db": round(m.overall.lafmin_db, 1),
+        "percentiles": {k: round(v, 1) for k, v in m.overall.percentiles.items()},
+        "day": _rating_dict(m.day), "night": _rating_dict(m.night),
+        "sources": _combined_event_shares(cfg, events),
+    }
+
+
+def combined_levels(db_paths: list[Path], buckets: int = 900) -> list[dict]:
+    """Verlauf über mehrere Messungen: je Datei gebucketet, dann zusammengefügt."""
+    per = max(buckets // max(len(db_paths), 1), 100)
+    pts: list[dict] = []
+    for p in db_paths:
+        pts.extend(session_levels(p, per))
+    pts.sort(key=lambda x: x["ts"])
+    return pts
 
 
 def export_csv(db_path: Path, out_path: Path | None = None) -> Path:

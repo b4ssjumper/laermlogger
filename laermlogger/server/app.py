@@ -15,7 +15,7 @@ import logging
 import time
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, HTMLResponse
 
 from ..config import Config
@@ -186,6 +186,82 @@ async def session_levels_ep(session_name: str, buckets: int = 800):
     if not db_path.exists():
         raise HTTPException(404, "Session nicht gefunden")
     return await asyncio.to_thread(session_levels, db_path, buckets)
+
+
+def _sessions_in_range(from_date: str | None, to_date: str | None) -> list[Path]:
+    """session_*.sqlite mit Startdatum im Zeitraum [from, to] (inklusive)."""
+    import sqlite3
+    from datetime import date, datetime
+
+    d_from = date.fromisoformat(from_date) if from_date else date.min
+    d_to = date.fromisoformat(to_date) if to_date else date.max
+    out = []
+    for f in Path(_cfg.db_dir).glob("session_*.sqlite"):
+        try:
+            c = sqlite3.connect(f)
+            row = c.execute("SELECT started_at FROM session WHERE id = 1").fetchone()
+            c.close()
+        except Exception:
+            continue
+        if not row or not row[0]:
+            continue
+        if d_from <= datetime.fromtimestamp(row[0]).date() <= d_to:
+            out.append(f)
+    return sorted(out)
+
+
+@app.get("/api/combine/summary")
+async def combine_summary(from_: str = Query(None, alias="from"), to: str = None):
+    from ..report.protocol import combined_summary
+
+    paths = _sessions_in_range(from_, to)
+    if not paths:
+        raise HTTPException(404, "keine Messungen im Zeitraum")
+    return await asyncio.to_thread(combined_summary, paths, _cfg)
+
+
+@app.get("/api/combine/levels")
+async def combine_levels(from_: str = Query(None, alias="from"), to: str = None, buckets: int = 900):
+    from ..report.protocol import combined_levels
+
+    paths = _sessions_in_range(from_, to)
+    if not paths:
+        return []
+    return await asyncio.to_thread(combined_levels, paths, buckets)
+
+
+@app.get("/api/combine/events")
+async def combine_events(from_: str = Query(None, alias="from"), to: str = None):
+    """Alle Ereignis-Clips im Zeitraum, je Clip mit Session + Nutzer-Label (zum Labeln)."""
+    from .. import custom_sounds
+    from ..report.protocol import _combined_audio_events
+
+    paths = _sessions_in_range(from_, to)
+    events = await asyncio.to_thread(_combined_audio_events, paths)
+    label_cache: dict = {}
+    out = []
+    for e in events:
+        s = e["session"]
+        if s not in label_cache:
+            label_cache[s] = custom_sounds.labels_for_session(_cfg, s)
+        out.append({"ts": e["start"].timestamp(), "peak_db": e["peak_db"],
+                    "category": e["category"], "mp3": e["mp3"],
+                    "custom_label": e.get("custom_label", ""), "session": e["session"],
+                    "user_label": label_cache[s].get(e["mp3"], "")})
+    return out
+
+
+@app.get("/api/combine/report")
+async def combine_report(from_: str = Query(None, alias="from"), to: str = None):
+    from ..report.protocol import build_combined_report
+
+    paths = _sessions_in_range(from_, to)
+    if not paths:
+        raise HTTPException(404, "keine Messungen im Zeitraum")
+    name = f"kombi_{from_ or 'start'}_{to or 'ende'}.pdf"
+    out = Path(_cfg.db_dir) / name
+    await asyncio.to_thread(build_combined_report, paths, _cfg, out)
+    return FileResponse(out, media_type="application/pdf", filename=name)
 
 
 @app.get("/api/session/{session_name}/events")

@@ -31,6 +31,8 @@
   .range button { background: var(--panel); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .3rem .7rem; font-size: .8rem; font-weight: 500; cursor: pointer; }
   .range button.active { background: var(--accent); color: #06232f; border-color: var(--accent); }
   .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
+  .opt { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
+  .opt input[type=number], .opt input[type=date] { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: .35rem .5rem; }
   button {
     background: var(--accent); color: #06232f; border: 0; border-radius: 8px;
     padding: .55rem 1.2rem; font-size: .95rem; font-weight: 600; cursor: pointer;
@@ -85,6 +87,8 @@
 <div class="row">
   <input id="location" placeholder="Messort">
   <input id="operator" placeholder="Messperson">
+  <label class="opt">Schwelle <input id="threshold" type="number" value="60" min="30" max="130" style="width:4rem"> dB</label>
+  <label class="opt"><input id="rollover" type="checkbox"> Tageswechsel um Mitternacht</label>
   <button id="btnStart">▶ Messung starten</button>
   <button id="btnStop" class="stop" disabled>■ Stopp</button>
   <span class="badge" id="serialBadge">Seriell: –</span>
@@ -140,7 +144,17 @@
 </div>
 
 <div class="card wide" style="margin-top:1rem">
-  <div class="label" style="margin-bottom:.4rem">Messungen &amp; Protokolle</div>
+  <div class="label" style="margin-bottom:.5rem">Bericht für einen Zeitraum</div>
+  <div class="row" style="margin-bottom:0">
+    <label class="opt">von <input id="combFrom" type="date"></label>
+    <label class="opt">bis <input id="combTo" type="date"></label>
+    <button id="btnCombine">📊 Zeitraum öffnen</button>
+    <span class="muted" style="font-size:.82rem">Alle Daten im Zeitraum — Clips anhören &amp; labeln, dann PDF erzeugen.</span>
+  </div>
+</div>
+
+<div class="card wide" style="margin-top:1rem">
+  <div class="label" style="margin-bottom:.4rem">Einzelne Messungen</div>
   <div id="sessions" class="muted">–</div>
 </div>
 
@@ -237,15 +251,16 @@ async function saveLabel(mp3, label, session) {
 function clipRowsHTML(evs, labels, name) {
   return evs.map(e => {
     const t = new Date(e.ts * 1000).toLocaleString("de-DE");
-    const userLabel = labels[e.mp3] || "";
+    const sess = e.session || name;   // im Zeitraum kann jeder Clip aus anderer Session sein
+    const userLabel = (e.user_label !== undefined) ? e.user_label : (labels[e.mp3] || "");
     const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
     return `<div class="ev"><span class="t">${t}</span>`
       + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
       + `<span class="cat">${e.category || "—"}</span>`
-      + `<audio controls preload="none" src="/api/audio/${name}/${e.mp3}"></audio>`
+      + `<audio controls preload="none" src="/api/audio/${sess}/${e.mp3}"></audio>`
       + pred
       + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
-      + ` onchange="saveLabel('${e.mp3}', this.value, '${name}')"></div>`;
+      + ` onchange="saveLabel('${e.mp3}', this.value, '${sess}')"></div>`;
   }).join("");
 }
 
@@ -429,6 +444,55 @@ async function openReview(name) {
 
 function closeReview() { $("review").hidden = true; }
 
+// ---- Zeitraum-Bericht: alle Daten im Zeitraum, Clips labeln, dann PDF -----
+async function openCombined(from, to) {
+  const rv = $("review");
+  rv.hidden = false;
+  rv.scrollIntoView({behavior: "smooth"});
+  const q = `from=${from || ""}&to=${to || ""}`;
+  const label = (from || "Beginn") + " bis " + (to || "Ende");
+  $("reviewTitle").textContent = "Zeitraum: " + label;
+  $("reviewBody").innerHTML = '<span class="muted">lädt…</span>';
+  $("reviewClips").innerHTML = "";
+  const [sum, lv] = await Promise.all([
+    fetch(`/api/combine/summary?${q}`).then(r => r.ok ? r.json() : null).catch(() => null),
+    fetch(`/api/combine/levels?${q}`).then(r => r.json()).catch(() => [])
+  ]);
+  $("reviewActions").innerHTML =
+      `<a href="/api/combine/report?${q}" target="_blank">📄 PDF erzeugen</a>`
+    + `<a class="close" href="#" onclick="closeReview();return false">✕ schließen</a>`;
+  if (!sum || !sum.n_samples) {
+    $("reviewBody").innerHTML = '<p class="muted">Keine Messdaten in diesem Zeitraum.</p>';
+    return;
+  }
+  const p = sum.percentiles || {};
+  const rate = (r, lbl) => r ? `<div class="rv-row"><b>${lbl}</b> Lr ${r.rating_level_db} dB / Richtwert ${r.limit_db} dB — `
+      + (r.exceeds_limit ? `<span style="color:var(--bad)">überschritten</span>` : `<span style="color:var(--ok)">eingehalten</span>`)
+      + (r.note ? ` <span class="muted">(${r.note})</span>` : "") + `</div>` : "";
+  $("reviewBody").innerHTML =
+      `<div class="rv-grid">`
+    + `<div><span class="label">LAeq</span><div class="rv-val">${sum.laeq_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">LAFmax</span><div class="rv-val">${sum.lafmax_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">LAFmin</span><div class="rv-val">${sum.lafmin_db ?? "–"} dB</div></div>`
+    + `<div><span class="label">Messungen</span><div class="rv-val">${sum.n_sessions ?? "–"}</div></div>`
+    + `</div>`
+    + `<div class="perc" style="margin:.5rem 0">` + Object.entries(p).map(([k,v]) => `<span>${k}: <b>${v}</b> dB</span>`).join("") + `</div>`
+    + rate(sum.day, "Tag") + rate(sum.night, "Nacht")
+    + `<div class="muted" style="margin:.3rem 0">${sum.n_samples} Werte · ${sum.n_events} Ereignisse aus ${sum.n_sessions} Messung(en)</div>`
+    + (sum.sources && sum.sources.length ? `<div class="muted">Quellen: ` + sum.sources.map(s => `${s.category} ${(s.share*100).toFixed(0)}%`).join(" · ") + `</div>` : "")
+    + `<canvas id="reviewChart" width="1060" height="300" style="margin-top:.6rem"></canvas>`;
+  drawChart($("reviewChart"), lv);
+
+  const evs = await fetch(`/api/combine/events?${q}`).then(r => r.json()).catch(() => []);
+  $("reviewClips").innerHTML = evs.length
+    ? `<div class="label" style="margin:.4rem 0">Clips im Zeitraum (${evs.length}) — anhören &amp; benennen, dann oben PDF erzeugen</div>` + clipRowsHTML(evs, {}, null)
+    : '<div class="muted">Keine Clips im Zeitraum.</div>';
+}
+
+$("btnCombine").onclick = () => {
+  openCombined($("combFrom").value, $("combTo").value);
+};
+
 document.querySelectorAll("#rangeToggle button").forEach(b => {
   b.onclick = () => {
     chartRange = parseInt(b.dataset.sec);
@@ -439,10 +503,15 @@ document.querySelectorAll("#rangeToggle button").forEach(b => {
 });
 
 $("btnStart").onclick = async () => {
-  await fetch("/api/session/start", {
+  const r = await fetch("/api/session/start", {
     method: "POST", headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ location: $("location").value, operator: $("operator").value })
+    body: JSON.stringify({
+      location: $("location").value, operator: $("operator").value,
+      threshold_db: parseFloat($("threshold").value) || 60,
+      daily_rollover: $("rollover").checked
+    })
   });
+  if (!r.ok) alert("Start nicht möglich: " + (await r.text()));
 };
 $("btnStop").onclick = async () => {
   const r = await fetch("/api/session/stop", { method: "POST" });
