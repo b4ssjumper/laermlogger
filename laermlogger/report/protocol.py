@@ -302,20 +302,27 @@ def _load_audio_events(db_path: Path) -> list[dict]:
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
-            "SELECT ts, peak_db, category, mp3_path, custom_label "
+            "SELECT ts, peak_db, category, mp3_path, custom_label, custom_score "
             "FROM events ORDER BY peak_db DESC"
         ).fetchall()
     except sqlite3.OperationalError:
         try:
-            rows = [(r[0], r[1], r[2], r[3], "") for r in conn.execute(
-                "SELECT ts, peak_db, category, mp3_path FROM events "
-                "ORDER BY peak_db DESC")]
+            rows = [(r[0], r[1], r[2], r[3], r[4] if len(r) > 4 else "", 0.0)
+                    for r in conn.execute(
+                        "SELECT ts, peak_db, category, mp3_path, custom_label "
+                        "FROM events ORDER BY peak_db DESC")]
         except sqlite3.OperationalError:
-            return []
+            try:
+                rows = [(r[0], r[1], r[2], r[3], "", 0.0) for r in conn.execute(
+                    "SELECT ts, peak_db, category, mp3_path FROM events "
+                    "ORDER BY peak_db DESC")]
+            except sqlite3.OperationalError:
+                return []
     finally:
         conn.close()
     return [{"start": datetime.fromtimestamp(r[0]), "peak_db": r[1],
-             "category": r[2], "mp3": r[3], "custom_label": r[4]} for r in rows]
+             "category": r[2], "mp3": r[3], "custom_label": r[4],
+             "custom_score": r[5]} for r in rows]
 
 
 def _event_source_shares(db_path: Path, cfg: Config, events: list[dict]) -> list[dict]:

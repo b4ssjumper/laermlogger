@@ -102,6 +102,8 @@ class Config:
     db_dir: str = str(DATA_DIR)
     dashboard_host: str = "0.0.0.0"
     dashboard_port: int = 8000
+    daily_rollover: bool = False   # UI-Standard: Tageswechsel um Mitternacht
+    label_set: list = field(default_factory=list)  # feste Labels für die Klassifizierung
 
     @classmethod
     def load(cls, path: Path = CONFIG_FILE) -> "Config":

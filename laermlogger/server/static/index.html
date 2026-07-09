@@ -59,7 +59,9 @@
   .ev .db { font-weight: 600; color: var(--accent); min-width: 4rem; font-variant-numeric: tabular-nums; }
   .ev .cat { min-width: 8rem; }
   .ev audio { height: 2rem; max-width: 100%; }
-  .ev input.lbl { width: 9rem; padding: .3rem .5rem; }
+  .ev input.lbl, .ev select.lbl { width: 11rem; padding: .35rem .5rem; background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: .3rem; background: var(--panel); border: 1px solid var(--accent); color: var(--text); border-radius: 99px; padding: .15rem .6rem; font-size: .8rem; margin-right: .3rem; }
+  .chip a { color: var(--bad); text-decoration: none; font-weight: 700; }
   .ev .pred { font-size: .78rem; color: var(--ok); border: 1px solid var(--ok); border-radius: 99px; padding: .1rem .5rem; }
   #trainBar { display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; margin-bottom: .7rem; }
   #btnTrain { background: var(--ok); color: #05261a; }
@@ -155,7 +157,13 @@
   <div class="label" style="margin-bottom:.4rem">Ereignisse (lauteste Momente — anhören &amp; benennen)</div>
   <div id="trainBar">
     <button id="btnTrain">🎯 Eigene Geräusche trainieren</button>
-    <span id="labelSummary" class="muted">Noch keine Labels — hör dir Clips an und trag rechts ein, was es ist.</span>
+    <span id="labelSummary" class="muted">Noch keine Labels — hör dir Clips an und wähle rechts, was es ist.</span>
+  </div>
+  <div id="labelManager" class="row" style="margin:.2rem 0 .8rem;font-size:.85rem">
+    <span class="muted">Feste Labels:</span>
+    <span id="labelChips"></span>
+    <input id="newLabel" placeholder="neues Label" style="width:9rem" onkeydown="if(event.key==='Enter')addLabel()">
+    <button id="addLabel" class="ghost" onclick="addLabel()">+ hinzufügen</button>
   </div>
   <datalist id="labelList"></datalist>
   <div id="eventClips" class="muted">Noch keine Ereignisse.</div>
@@ -265,17 +273,27 @@ function clipRowsHTML(evs, labels, name) {
     const t = new Date(e.ts * 1000).toLocaleString("de-DE");
     const sess = e.session || name;   // im Zeitraum kann jeder Clip aus anderer Session sein
     const userLabel = (e.user_label !== undefined) ? e.user_label : (labels[e.mp3] || "");
-    const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}</span>` : "";
+    const sc = e.custom_score ? ` ${Math.round(e.custom_score * 100)}%` : "";
+    const pred = (e.custom_label && !userLabel) ? `<span class="pred">🎯 ${e.custom_label}${sc}</span>` : "";
     return `<div class="ev"><span class="t">${t}</span>`
       + `<span class="db">${e.peak_db.toFixed(1)} dB</span>`
       + `<span class="cat">${e.category || "—"}</span>`
       + `<audio controls preload="none" src="/api/audio/${sess}/${e.mp3}"></audio>`
-      + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
-      + ` onchange="saveLabel('${e.mp3}', this.value, '${sess}')">`
+      + labelSelectHTML(userLabel, e.mp3, sess)
       + `<button class="doneBtn" title="${e.done ? 'zurück in die Liste holen' : 'erledigt → ins Archiv'}"`
       + ` onclick="markDone('${e.mp3}','${sess}',${e.done ? 1 : 0},this)">${e.done ? '↩' : '✓ erledigt'}</button>`
       + pred + `</div>`;
   }).join("");
+}
+
+function labelSelectHTML(current, mp3, sess) {
+  const opts = labelSet.slice();
+  if (current && !opts.includes(current)) opts.unshift(current);  // Alt-Label erhalten
+  const esc = s => s.replace(/"/g, "&quot;");
+  return `<select class="lbl" onchange="saveLabel('${mp3}', this.value, '${sess}')">`
+    + `<option value="">— Label wählen —</option>`
+    + opts.map(l => `<option value="${esc(l)}"${l === current ? " selected" : ""}>${l}</option>`).join("")
+    + `</select>`;
 }
 
 async function markDone(mp3, session, isDone, btn) {
@@ -565,11 +583,54 @@ document.addEventListener("play", e => {
   document.querySelectorAll("audio").forEach(a => { if (a !== e.target) a.pause(); });
 }, true);
 
-// Schwelle & Tageswechsel im Browser merken (bleiben nach Refresh erhalten)
-$("threshold").value = localStorage.getItem("clipThreshold") || 60;
-$("threshold").onchange = () => localStorage.setItem("clipThreshold", $("threshold").value);
-$("rollover").checked = localStorage.getItem("rollover") === "1";
-$("rollover").onchange = () => localStorage.setItem("rollover", $("rollover").checked ? "1" : "0");
+// Einstellungen serverseitig (config.json) — gelten geräte-/browserübergreifend
+let labelSet = [];
+
+async function loadSettings() {
+  try {
+    const s = await fetch("/api/settings").then(r => r.json());
+    $("threshold").value = s.threshold_db ?? 60;
+    $("rollover").checked = !!s.daily_rollover;
+    labelSet = s.label_set || [];
+    renderLabelChips();
+    $("labelList").innerHTML = labelSet.map(l => `<option value="${l}">`).join("");
+  } catch (e) { /* ignore */ }
+}
+
+async function saveSettings(partial) {
+  await fetch("/api/settings", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(partial)
+  });
+}
+
+function renderLabelChips() {
+  $("labelChips").innerHTML = labelSet.length
+    ? labelSet.map(l => `<span class="chip">${l}<a href="#" onclick="removeLabel('${l.replace(/'/g,"\\'")}');return false">×</a></span>`).join("")
+    : '<span class="muted">noch keine — lege welche an</span>';
+}
+
+async function addLabel() {
+  const v = $("newLabel").value.trim();
+  if (!v || labelSet.includes(v)) { $("newLabel").value = ""; return; }
+  labelSet.push(v);
+  $("newLabel").value = "";
+  await saveSettings({ label_set: labelSet });
+  renderLabelChips();
+  $("labelList").innerHTML = labelSet.map(l => `<option value="${l}">`).join("");
+  loadClips(true);   // Dropdowns aktualisieren
+}
+
+async function removeLabel(name) {
+  labelSet = labelSet.filter(l => l !== name);
+  await saveSettings({ label_set: labelSet });
+  renderLabelChips();
+  loadClips(true);
+}
+
+$("threshold").onchange = () => saveSettings({ threshold_db: parseFloat($("threshold").value) || 60 });
+$("rollover").onchange = () => saveSettings({ daily_rollover: $("rollover").checked });
+loadSettings();
 
 connect();
 loadSessions();

@@ -76,6 +76,38 @@ async def index():
     )
 
 
+@app.get("/api/settings")
+async def get_settings():
+    """Gespeicherte Standardwerte (Schwelle, Tageswechsel, feste Labels)."""
+    return {"threshold_db": _cfg.events.threshold_db,
+            "daily_rollover": _cfg.daily_rollover,
+            "label_set": _cfg.label_set}
+
+
+@app.post("/api/settings")
+async def save_settings(payload: dict):
+    """Standardwerte in config.json speichern (browser-/geräteübergreifend)."""
+    if "threshold_db" in payload:
+        try:
+            _cfg.events.threshold_db = float(payload["threshold_db"])
+        except (TypeError, ValueError):
+            pass
+    if "daily_rollover" in payload:
+        _cfg.daily_rollover = bool(payload["daily_rollover"])
+    if "label_set" in payload and isinstance(payload["label_set"], list):
+        # sauber: getrimmt, ohne Leere, ohne Duplikate, Reihenfolge erhalten
+        seen, clean = set(), []
+        for x in payload["label_set"]:
+            s = str(x).strip()
+            if s and s not in seen:
+                seen.add(s)
+                clean.append(s)
+        _cfg.label_set = clean
+    await asyncio.to_thread(_cfg.save)
+    return {"ok": True, "threshold_db": _cfg.events.threshold_db,
+            "daily_rollover": _cfg.daily_rollover, "label_set": _cfg.label_set}
+
+
 @app.post("/api/session/start")
 async def start_session(payload: dict | None = None):
     st = _read_status()
@@ -302,6 +334,7 @@ async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
         filtered.append({"ts": e["start"].timestamp(), "peak_db": e["peak_db"],
                          "category": e["category"], "mp3": e["mp3"],
                          "custom_label": e.get("custom_label", ""),
+                         "custom_score": e.get("custom_score", 0),
                          "session": e["session"],
                          "user_label": label_cache[s].get(e["mp3"], ""),
                          "done": is_done})

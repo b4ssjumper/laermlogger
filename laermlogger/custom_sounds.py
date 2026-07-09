@@ -68,10 +68,10 @@ def done_for_session(cfg, session: str) -> set:
 def label_clip(cfg, session: str, mp3: str, label: str) -> None:
     c = _conn(cfg)
     label = label.strip()
-    if label:
-        c.execute("INSERT OR REPLACE INTO labels VALUES (?, ?, ?)", (session, mp3, label))
-    else:
-        c.execute("DELETE FROM labels WHERE session=? AND mp3=?", (session, mp3))
+    # Spalten explizit benennen (Tabelle hat auch done) und done-Flag erhalten
+    c.execute("INSERT INTO labels (session, mp3, label) VALUES (?, ?, ?) "
+              "ON CONFLICT(session, mp3) DO UPDATE SET label=excluded.label",
+              (session, mp3, label))
     c.commit()
     c.close()
 

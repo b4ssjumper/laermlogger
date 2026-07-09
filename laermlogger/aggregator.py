@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS events (
     top_classes TEXT DEFAULT '',
     mp3_path TEXT DEFAULT '',     -- relativ zum Session-Ordner
     duration_s REAL DEFAULT 0,
-    custom_label TEXT DEFAULT ''  -- Vorhersage des eigenen Modells
+    custom_label TEXT DEFAULT '', -- Vorhersage des eigenen Modells
+    custom_score REAL DEFAULT 0   -- Konfidenz (Kosinus-Ähnlichkeit) 0..1
 );
 CREATE INDEX IF NOT EXISTS idx_ev_ts ON events(ts);
 """
@@ -341,19 +342,20 @@ class SessionAggregator:
                 continue
             category, top = self._category_at(peak_ts)
             # eigenes Modell (falls trainiert) auf den Clip anwenden
-            custom_label = ""
+            custom_label, custom_score = "", 0.0
             if self._custom_model and self._classifier:
                 try:
                     feat = self._classifier.embed(wave)
-                    lbl, _sim = self._custom_model.predict(feat)
+                    lbl, sim = self._custom_model.predict(feat)
                     custom_label = lbl or ""
+                    custom_score = float(sim)
                 except Exception as exc:
                     log.debug("Custom-Predict fehlgeschlagen: %s", exc)
             with self._db_lock:
                 self._conn.execute(
-                    "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (peak_ts, peak_db, category, top, fname,
-                     ec.pre_seconds + ec.post_seconds, custom_label),
+                     ec.pre_seconds + ec.post_seconds, custom_label, custom_score),
                 )
                 self._conn.commit()
             self._n_events += 1
