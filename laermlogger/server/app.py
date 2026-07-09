@@ -231,23 +231,28 @@ async def session_levels_ep(session_name: str, buckets: int = 800):
 
 
 def _sessions_in_range(from_date: str | None, to_date: str | None) -> list[Path]:
-    """session_*.sqlite mit Startdatum im Zeitraum [from, to] (inklusive)."""
+    """session_*.sqlite, deren Messzeitraum den Filter [from, to] BERÜHRT
+    (Überlappung — eine Messung über Mitternacht zählt für beide Tage)."""
     import sqlite3
-    from datetime import date, datetime
+    from datetime import date, datetime, time as dtime
 
-    d_from = date.fromisoformat(from_date) if from_date else date.min
-    d_to = date.fromisoformat(to_date) if to_date else date.max
+    ts_from = (datetime.combine(date.fromisoformat(from_date), dtime.min).timestamp()
+               if from_date else 0.0)
+    ts_to = (datetime.combine(date.fromisoformat(to_date), dtime.max).timestamp()
+             if to_date else 9e18)
     out = []
     for f in Path(_cfg.db_dir).glob("session_*.sqlite"):
         try:
             c = sqlite3.connect(f)
-            row = c.execute("SELECT started_at FROM session WHERE id = 1").fetchone()
+            row = c.execute("SELECT started_at, ended_at FROM session "
+                            "WHERE id = 1").fetchone()
             c.close()
         except Exception:
             continue
         if not row or not row[0]:
             continue
-        if d_from <= datetime.fromtimestamp(row[0]).date() <= d_to:
+        start, end = row[0], (row[1] or time.time())
+        if end >= ts_from and start <= ts_to:   # Überlappung
             out.append(f)
     return sorted(out)
 
@@ -274,27 +279,47 @@ async def combine_levels(from_: str = Query(None, alias="from"), to: str = None,
 
 @app.get("/api/combine/events")
 async def combine_events(from_: str = Query(None, alias="from"), to: str = None,
-                         limit: int = 300):
-    """Lauteste Ereignis-Clips im Zeitraum (nach Pegel), je Clip mit Session +
-    Nutzer-Label (zum Labeln). `limit` begrenzt die Anzahl für die Anzeige."""
+                         offset: int = 0, limit: int = 25, include_done: bool = False):
+    """Ereignis-Clips im Zeitraum (nach Pegel absteigend), zum Labeln.
+    Erledigte Clips (im Archiv) werden standardmäßig ausgeblendet.
+    offset/limit für Lazy Loading; gibt {clips, total, remaining} zurück."""
     from .. import custom_sounds
     from ..report.protocol import _combined_audio_events
 
     paths = _sessions_in_range(from_, to)
     events = await asyncio.to_thread(_combined_audio_events, paths)
-    total = len(events)
-    events = events[:limit]     # bereits nach Pegel absteigend sortiert
     label_cache: dict = {}
-    out = []
+    done_cache: dict = {}
+    filtered = []
     for e in events:
         s = e["session"]
         if s not in label_cache:
             label_cache[s] = custom_sounds.labels_for_session(_cfg, s)
-        out.append({"ts": e["start"].timestamp(), "peak_db": e["peak_db"],
-                    "category": e["category"], "mp3": e["mp3"],
-                    "custom_label": e.get("custom_label", ""), "session": e["session"],
-                    "user_label": label_cache[s].get(e["mp3"], "")})
-    return out
+            done_cache[s] = custom_sounds.done_for_session(_cfg, s)
+        is_done = e["mp3"] in done_cache[s]
+        if is_done and not include_done:
+            continue
+        filtered.append({"ts": e["start"].timestamp(), "peak_db": e["peak_db"],
+                         "category": e["category"], "mp3": e["mp3"],
+                         "custom_label": e.get("custom_label", ""),
+                         "session": e["session"],
+                         "user_label": label_cache[s].get(e["mp3"], ""),
+                         "done": is_done})
+    page = filtered[offset:offset + limit]
+    return {"clips": page, "total": len(filtered),
+            "remaining": max(0, len(filtered) - offset - len(page))}
+
+
+@app.post("/api/done")
+async def set_done(payload: dict):
+    """Clip als erledigt markieren (Archiv) oder zurückholen."""
+    from .. import custom_sounds
+
+    session, mp3 = payload.get("session"), payload.get("mp3")
+    if not session or not mp3:
+        raise HTTPException(400, "session und mp3 nötig")
+    custom_sounds.mark_done(_cfg, session, mp3, bool(payload.get("done", True)))
+    return {"ok": True}
 
 
 @app.get("/api/combine/report")

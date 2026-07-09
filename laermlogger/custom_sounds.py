@@ -35,9 +35,33 @@ def _model_path(cfg) -> Path:
 def _conn(cfg) -> sqlite3.Connection:
     c = sqlite3.connect(_labels_db(cfg))
     c.execute("CREATE TABLE IF NOT EXISTS labels "
-              "(session TEXT, mp3 TEXT, label TEXT, PRIMARY KEY(session, mp3))")
+              "(session TEXT, mp3 TEXT, label TEXT, done INTEGER DEFAULT 0, "
+              "PRIMARY KEY(session, mp3))")
+    # Migration für bestehende DBs ohne done-Spalte
+    try:
+        c.execute("ALTER TABLE labels ADD COLUMN done INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     c.commit()
     return c
+
+
+def mark_done(cfg, session: str, mp3: str, done: bool = True) -> None:
+    """Einen Clip als erledigt markieren (wandert ins Archiv) oder zurückholen."""
+    c = _conn(cfg)
+    c.execute("INSERT INTO labels (session, mp3, done) VALUES (?, ?, ?) "
+              "ON CONFLICT(session, mp3) DO UPDATE SET done=excluded.done",
+              (session, mp3, 1 if done else 0))
+    c.commit()
+    c.close()
+
+
+def done_for_session(cfg, session: str) -> set:
+    c = _conn(cfg)
+    rows = c.execute("SELECT mp3 FROM labels WHERE session=? AND done=1",
+                     (session,)).fetchall()
+    c.close()
+    return {r[0] for r in rows}
 
 
 # -- Labeln ------------------------------------------------------------

@@ -31,6 +31,10 @@
   .range button { background: var(--panel); color: var(--muted); border: 1px solid var(--border); border-radius: 6px; padding: .3rem .7rem; font-size: .8rem; font-weight: 500; cursor: pointer; }
   .range button.active { background: var(--accent); color: #06232f; border-color: var(--accent); }
   .pdflink { color: var(--accent); text-decoration: none; border: 1px solid var(--accent); border-radius: 8px; padding: .5rem 1rem; font-weight: 600; font-size: .9rem; }
+  button.ghost { background: var(--panel); color: var(--muted); border: 1px solid var(--border); }
+  .doneBtn { background: var(--panel); color: var(--ok); border: 1px solid var(--ok); border-radius: 6px; padding: .3rem .6rem; font-size: .8rem; cursor: pointer; white-space: nowrap; }
+  #clipFoot #moreBtn { background: var(--panel); color: var(--accent); border: 1px solid var(--accent); }
+  #clipHead { justify-content: space-between; }
   .row { display: flex; gap: .8rem; flex-wrap: wrap; align-items: center; margin-bottom: 1rem; }
   .opt { display: flex; align-items: center; gap: .4rem; color: var(--muted); font-size: .85rem; }
   .opt input[type=number], .opt input[type=date] { background: var(--panel); border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: .35rem .5rem; }
@@ -136,7 +140,7 @@
     <label class="opt">von <input id="fFrom" type="date"></label>
     <label class="opt">bis <input id="fTo" type="date"></label>
     <button id="fApply">Filtern</button>
-    <button id="fClear" class="stop" hidden>× Filter aus</button>
+    <button id="fClear" class="ghost">× zurücksetzen</button>
     <a id="fPdf" href="#" target="_blank" class="pdflink" hidden>📄 PDF für Zeitraum</a>
   </div>
   <canvas id="chart" width="1400" height="340"></canvas>
@@ -201,8 +205,7 @@ function render(s) {
   $("percentiles").innerHTML = Object.keys(p).length
     ? Object.entries(p).map(([k, v]) => `<span>${k}: <b>${fmt(v)}</b> dB</span>`).join("")
     : "–";
-
-  renderEvents(s.events || [], s.session_name);
+  // Clip-Panel wird durch loadClips() gespeist (nicht durch den Live-Strom)
 }
 
 let curSession = null;
@@ -269,8 +272,19 @@ function clipRowsHTML(evs, labels, name) {
       + `<audio controls preload="none" src="/api/audio/${sess}/${e.mp3}"></audio>`
       + pred
       + `<input class="lbl" list="labelList" placeholder="Was ist das?" value="${userLabel}"`
-      + ` onchange="saveLabel('${e.mp3}', this.value, '${sess}')"></div>`;
+      + ` onchange="saveLabel('${e.mp3}', this.value, '${sess}')">`
+      + `<button class="doneBtn" title="${e.done ? 'zurück in die Liste holen' : 'erledigt → ins Archiv'}"`
+      + ` onclick="markDone('${e.mp3}','${sess}',${e.done ? 1 : 0},this)">${e.done ? '↩' : '✓ erledigt'}</button></div>`;
   }).join("");
+}
+
+async function markDone(mp3, session, isDone, btn) {
+  await fetch("/api/done", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ session, mp3, done: !isDone })
+  });
+  const row = btn.closest(".ev");
+  if (row) row.remove();   // aus der aktuellen Ansicht nehmen
 }
 
 // Clip-Browser einer (auch abgeschlossenen) Messung: alle Clips anhören & benennen
@@ -460,39 +474,55 @@ async function openReview(name) {
 
 function closeReview() { $("review").hidden = true; }
 
-// ---- Zeitraum-Filter: filtert Graph + Clips-Panel, PDF für den Zeitraum ----
+// ---- Clip-Liste: immer die aufgezeichneten Clips (alle Daten oder Filter) ----
+let clipQ = "";            // aktueller Zeitraum-Filter ("" = alle Daten)
+let clipOffset = 0;
+let showArchive = false;
+
 async function applyFilter() {
   filterFrom = $("fFrom").value || null;
   filterTo = $("fTo").value || null;
-  if (!filterActive()) { clearFilter(); return; }
-  const q = `from=${filterFrom || ""}&to=${filterTo || ""}`;
   document.querySelectorAll("#rangeToggle button").forEach(x => x.classList.remove("active"));
-  $("fClear").hidden = false;
-  $("fPdf").hidden = false;
-  $("fPdf").href = `/api/combine/report?${q}`;
+  const q = filterActive() ? `from=${filterFrom || ""}&to=${filterTo || ""}` : "";
+  $("fPdf").hidden = !filterActive();
+  if (filterActive()) $("fPdf").href = `/api/combine/report?${q}`;
+  clipQ = q;
   refreshChart();
-  loadRangeClips(q);
+  loadClips(true);
 }
 
 function clearFilter() {
   filterFrom = filterTo = null;
   $("fFrom").value = ""; $("fTo").value = "";
-  $("fClear").hidden = true; $("fPdf").hidden = true;
+  $("fPdf").hidden = true;
   chartRange = 86400;
   document.querySelectorAll("#rangeToggle button").forEach(x =>
     x.classList.toggle("active", parseInt(x.dataset.sec) === 86400));
-  renderedClips = new Set(); eventsSessionKey = null; $("eventClips").innerHTML = "";
+  clipQ = "";
   refreshChart();
+  loadClips(true);
 }
 
-async function loadRangeClips(q) {
+async function loadClips(reset) {
   const el = $("eventClips");
-  el.innerHTML = '<span class="muted">lädt Clips…</span>';
-  const evs = await fetch(`/api/combine/events?${q}&limit=300`).then(r => r.json()).catch(() => []);
-  el.innerHTML = evs.length
-    ? `<div class="muted" style="margin-bottom:.4rem">Lauteste Clips im Zeitraum (${evs.length}) — anhören &amp; benennen, dann oben „PDF für Zeitraum".</div>`
-      + clipRowsHTML(evs, {}, null)
-    : '<div class="muted">Keine Clips im Zeitraum.</div>';
+  if (reset) {
+    clipOffset = 0;
+    el.innerHTML = `<div id="clipHead" class="row" style="margin:0 0 .5rem"></div>`
+      + `<div id="clipRows"></div><div id="clipFoot" style="margin-top:.5rem"></div>`;
+  }
+  const d = await fetch(`/api/combine/events?${clipQ}&offset=${clipOffset}&limit=25&include_done=${showArchive}`)
+    .then(r => r.json()).catch(() => ({clips: [], total: 0, remaining: 0}));
+  $("clipRows").insertAdjacentHTML("beforeend", clipRowsHTML(d.clips || [], {}, null));
+  clipOffset += (d.clips || []).length;
+  const scope = clipQ ? "im Zeitraum" : "gesamt";
+  $("clipHead").innerHTML =
+      `<span class="muted">${showArchive ? "Archiv (erledigt)" : "Offen"} ${scope}: <b>${d.total}</b> Clips</span>`
+    + `<label class="opt"><input type="checkbox" id="archToggle" ${showArchive ? "checked" : ""}> Archiv anzeigen</label>`;
+  $("archToggle").onchange = e => { showArchive = e.target.checked; loadClips(true); };
+  $("clipFoot").innerHTML = d.remaining > 0
+    ? `<button id="moreBtn">Mehr laden (${d.remaining} übrig)</button>`
+    : (clipOffset === 0 ? `<span class="muted">${showArchive ? "Archiv leer." : "Keine offenen Clips 🎉"}</span>` : "");
+  if (d.remaining > 0) $("moreBtn").onclick = () => loadClips(false);
 }
 
 $("fApply").onclick = applyFilter;
@@ -539,6 +569,7 @@ connect();
 loadSessions();
 loadLabels();
 refreshChart();
+loadClips(true);        // Clips sofort zeigen (alle Daten)
 let chartTick = 0;
 setInterval(() => {                       // Live/5min alle 2 s, Tag/Woche alle 30 s
   chartTick++;
